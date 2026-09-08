@@ -75,6 +75,9 @@ a time with checkpoints in between.
 
 ### Stages individually
 
+Global options (`--config`, `--epochs`, `--seeds`, ...) work on either side of the
+subcommand, so `--config c.yaml train` and `train --config c.yaml` are equivalent.
+
 ```bash
 python -m mindeye_lora.cli setup       # create the Drive workspace, print GPU info
 python -m mindeye_lora.cli assets      # download / slice the data (~3 GB, once)

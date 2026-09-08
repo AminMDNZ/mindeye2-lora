@@ -523,43 +523,74 @@ def cmd_status(args):
 # --------------------------------------------------------------------------------------
 # argparse
 # --------------------------------------------------------------------------------------
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser("mindeye-lora", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--root", default=None, help="workspace root (defaults to Drive)")
-    p.add_argument("--no-drive", action="store_true", help="do not mount Google Drive")
-    p.add_argument("--config", default=None, help="YAML config path")
+GLOBAL_DEFAULTS = {
+    "root": None, "no_drive": False, "config": None, "subj": None, "num_sessions": None,
+    "epochs": None, "batch_size": None, "lr": None, "time_budget_min": None,
+    "recon_n_images": None, "num_workers": None, "precision": None, "pretrain": None,
+    "upstream_ref": None, "recon_decoder": None, "seeds": None,
+}
+
+
+def _add_global_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Global options, attached to both the top level and every subcommand.
+
+    Defaults are SUPPRESS rather than None on purpose: with `parents=`, a subparser
+    that stored a None default would overwrite a value the top-level parser already
+    parsed, so `--config x run-all` would silently lose the config. Suppressed
+    defaults leave the namespace untouched when the flag is absent, and `main()`
+    backfills whatever is missing.
+    """
+    S = argparse.SUPPRESS
+    parser.add_argument("--root", default=S, help="workspace root (defaults to Drive)")
+    parser.add_argument("--no-drive", dest="no_drive", action="store_true", default=S,
+                        help="do not mount Google Drive")
+    parser.add_argument("--config", default=S, help="YAML config path")
     for name, kind in [("subj", int), ("num_sessions", int), ("epochs", int),
                        ("batch_size", int), ("lr", float), ("time_budget_min", float),
                        ("recon_n_images", int), ("num_workers", int)]:
-        p.add_argument(f"--{name}", type=kind, default=None)
-    p.add_argument("--precision", choices=["fp16", "bf16", "fp32"], default=None)
-    p.add_argument("--pretrain", default=None,
-                   choices=["multisubject_1024", "multisubject_4096", "reference_1sess"])
-    p.add_argument("--upstream_ref", default=None)
-    p.add_argument("--recon_decoder", default=None, choices=["none", "sdxl_unclip"])
-    p.add_argument("--seeds", nargs="*", default=None)
+        parser.add_argument(f"--{name}", type=kind, default=S)
+    parser.add_argument("--precision", choices=["fp16", "bf16", "fp32"], default=S)
+    parser.add_argument("--pretrain", default=S,
+                        choices=["multisubject_1024", "multisubject_4096", "reference_1sess"])
+    parser.add_argument("--upstream_ref", default=S)
+    parser.add_argument("--recon_decoder", default=S, choices=["none", "sdxl_unclip"])
+    parser.add_argument("--seeds", nargs="*", default=S)
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    # `common` is inherited by every subcommand so that global options work on either
+    # side of the subcommand name: `--config c.yaml train` and `train --config c.yaml`
+    # are equivalent. The latter is what everyone types first.
+    common = _add_global_args(argparse.ArgumentParser(add_help=False))
+
+    p = argparse.ArgumentParser("mindeye-lora", description=__doc__,
+                                parents=[common],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
 
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("setup").set_defaults(func=cmd_setup)
+    def add(name: str, **kw):
+        return sub.add_parser(name, parents=[common], **kw)
 
-    a = sub.add_parser("assets")
+    add("setup").set_defaults(func=cmd_setup)
+
+    a = add("assets")
     a.add_argument("--full-hdf5", action="store_true",
                    help="download the complete HDF5 files instead of streaming row subsets")
     a.add_argument("--force", action="store_true")
     a.set_defaults(func=cmd_assets)
 
-    pc = sub.add_parser("precompute")
+    pc = add("precompute")
     pc.add_argument("--force", action="store_true")
     pc.set_defaults(func=cmd_precompute)
 
-    v = sub.add_parser("verify")
+    v = add("verify")
     v.add_argument("--tree", action="store_true", help="print every Linear layer")
     v.add_argument("--lenient", action="store_true", help="do not fail on load mismatch")
     v.set_defaults(func=cmd_verify)
 
-    t = sub.add_parser("train")
+    t = add("train")
     t.add_argument("--arm", nargs="*", default=None)
     t.add_argument("--seed", nargs="*", default=None)
     t.add_argument("--restart", action="store_true", help="ignore saved state and start over")
@@ -568,14 +599,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="attempt the run even if it is predicted not to fit")
     t.set_defaults(func=cmd_train)
 
-    pr = sub.add_parser("predict")
+    pr = add("predict")
     pr.add_argument("--arm", nargs="*", default=None)
     pr.add_argument("--seed", nargs="*", default=None)
     pr.add_argument("--prior_timesteps", type=int, default=20)
     pr.add_argument("--force", action="store_true")
     pr.set_defaults(func=cmd_predict)
 
-    rc = sub.add_parser("recon")
+    rc = add("recon")
     rc.add_argument("--arm", nargs="*", default=None)
     rc.add_argument("--seed", nargs="*", default=None)
     rc.add_argument("--decoder", default=None, choices=["none", "sdxl_unclip"])
@@ -585,22 +616,22 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--force", action="store_true")
     rc.set_defaults(func=cmd_recon)
 
-    ev = sub.add_parser("evaluate")
+    ev = add("evaluate")
     ev.add_argument("--arm", nargs="*", default=None)
     ev.add_argument("--seed", nargs="*", default=None)
     ev.add_argument("--force", action="store_true")
     ev.set_defaults(func=cmd_evaluate)
 
-    cp = sub.add_parser("compare")
+    cp = add("compare")
     cp.add_argument("--reference", default="full")
     cp.add_argument("--frozen_arm", default="frozen")
     cp.add_argument("--equivalence_fraction", type=float, default=0.2)
     cp.add_argument("--n_boot", type=int, default=10000)
     cp.set_defaults(func=cmd_compare)
 
-    sub.add_parser("report").set_defaults(func=cmd_report)
+    add("report").set_defaults(func=cmd_report)
 
-    ra = sub.add_parser("run-all")
+    ra = add("run-all")
     ra.add_argument("--skip", nargs="*", default=None)
     ra.add_argument("--arm", nargs="*", default=None)
     ra.add_argument("--seed", nargs="*", default=None)
@@ -620,14 +651,18 @@ def build_parser() -> argparse.ArgumentParser:
     ra.add_argument("--n_boot", type=int, default=10000)
     ra.set_defaults(func=cmd_run_all)
 
-    sub.add_parser("status").set_defaults(func=cmd_status)
+    add("status").set_defaults(func=cmd_status)
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Suppressed global defaults never land in the namespace, so fill them in here.
+    for name, default in GLOBAL_DEFAULTS.items():
+        if not hasattr(args, name):
+            setattr(args, name, default)
     # defaults for options only defined on some subparsers
-    for name, default in [("batch_size", None), ("force", False), ("arm", None),
+    for name, default in [("force", False), ("arm", None),
                           ("seed", None), ("restart", False), ("full_hdf5", False),
                           ("decoder", None), ("n_images", None), ("num_steps", 38),
                           ("unclip_dir", None), ("prior_timesteps", 20),

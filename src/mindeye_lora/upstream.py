@@ -44,6 +44,9 @@ DALLE2_SUPPORT_REQS = [
     "webdataset",
     "click",
     "pydantic",
+    "pytorch-warmup",     # imported by dalle2_pytorch.trainer
+    "accelerate",
+    "embedding-reader",
 ]
 
 
