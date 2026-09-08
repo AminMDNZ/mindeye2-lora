@@ -1,4 +1,3 @@
-%%writefile /content/mindeye2-lora/setup/colab_setup.sh
 #!/usr/bin/env bash
 # Idempotent Colab environment setup.
 #
@@ -17,16 +16,16 @@ ROOT="${MINDEYE_LORA_ROOT:-/content/drive/MyDrive/mindeye2_lora}"
 export PIP_CACHE_DIR="${ROOT}/cache/pip"
 mkdir -p "${PIP_CACHE_DIR}"
 
-echo "-> pip cache: ${PIP_CACHE_DIR}"
+echo "→ pip cache: ${PIP_CACHE_DIR}"
 PIP="python -m pip install -q --cache-dir ${PIP_CACHE_DIR}"
 
-echo "-> core dependencies"
+echo "→ core dependencies"
 ${PIP} \
   "numpy>=1.26" "scipy>=1.11" "h5py>=3.10" "fsspec[http]>=2024.2.0" "aiohttp>=3.9" \
   "huggingface_hub>=0.23" "pyyaml>=6.0" "matplotlib>=3.8" "scikit-image>=0.22" \
   "tqdm>=4.66" "open_clip_torch>=2.24" "omegaconf>=2.3"
 
-echo "-> dalle2-pytorch runtime imports (no torch changes)"
+echo "→ dalle2-pytorch runtime imports (no torch changes)"
 # dalle2_pytorch/__init__.py imports its trainer, which pulls in pytorch-warmup,
 # accelerate and embedding-reader. Because we install dalle2 with --no-deps to protect
 # Colab's torch, every transitive import has to be listed here by hand.
@@ -36,10 +35,10 @@ ${PIP} \
   "clip-anytorch>=2.5" "resize-right>=0.0.2" "kornia>=0.7" "webdataset" "click" \
   "pytorch-warmup" "accelerate" "embedding-reader"
 
-echo "-> dalle2-pytorch (--no-deps, so torch is left alone)"
+echo "→ dalle2-pytorch (--no-deps, so torch is left alone)"
 ${PIP} --no-deps "dalle2-pytorch==1.15.6"
 
-echo "-> this package"
+echo "→ this package"
 ${PIP} -e .
 
 python - <<'PY'
@@ -91,9 +90,11 @@ def ensure(module: str, label: str, max_installs: int = 15) -> None:
     sys.exit(1)
 
 ensure("dalle2_pytorch", "dalle2_pytorch")
+ensure("pytorch_lightning", "pytorch_lightning")
+ensure("diffusers", "diffusers")
 ensure("open_clip", "open_clip")
 ensure("h5py", "h5py")
 ensure("fsspec", "fsspec")
 PY
 
-echo "environment ready"
+echo "✔ environment ready"

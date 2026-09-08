@@ -242,6 +242,15 @@ not activation bound — smaller batches barely help.
 | `full` | 8-bit AdamW | ~23 GB |
 | `lora_r16` | either | ~11 GB |
 
+The same applies one scale down: on a 16 GB T4 at `hidden_dim=1024`, the full arm needs
+8-bit AdamW *and* `batch_size` ≤ 8, while LoRA and frozen fit at 12. The shipped configs
+use `batch_size: 6, grad_accum: 4` so every arm runs identically at an effective batch of
+24.
+
+`capacity.estimate_memory` models the prior's attention explicitly, but its activation
+term carries a 5x empirical correction calibrated against a single observed T4 OOM — it
+is a guard rail, not a measurement. Real `peak_memory_bytes` per arm goes in the report.
+
 That gap *is* the result. It is also why the paper used an 8×A100-80GB node with
 DeepSpeed ZeRO-2, which shards optimiser state across GPUs.
 
@@ -277,10 +286,17 @@ Upstream attribute names changed. `cli.py verify` prints every Linear layer; adj
 It's installed `--no-deps` so it can't downgrade Colab's torch. If the fallback still
 fails, `!pip install dalle2-pytorch==1.15.6` in a fresh runtime and restart.
 
-**OOM, or "Arm 'full' probably will not fit".**
-On the 4096 config, set `optimizer: adamw8bit` (needs `bitsandbytes`) — for every arm.
-Otherwise switch `pretrain` to `multisubject_1024`. Lowering `batch_size` helps less
-than you would expect, because the memory is optimiser state rather than activations.
+**OOM, or "Arm 'X' probably will not fit".**
+The error names a `batch_size` / `grad_accum` pair that should fit — apply it in the
+config, keeping the product at 24. Which term dominates depends on the arm: for LoRA and
+frozen it is activations (the prior's `[batch, 32 heads, 257, 257]` attention matrices),
+so a smaller batch helps a lot; for the full fine-tune it is optimiser state, so
+`optimizer: adamw8bit` matters more. On a 16 GB T4 the full arm needs both.
+
+**A CUDA OOM is sticky in notebooks.** The traceback holds every local in every frame,
+including the model that just failed, so a retry often OOMs before training starts.
+`cmd_train` frees what it can, but if the next attempt fails at `model.to(device)`,
+restart the runtime — nothing on Drive is lost.
 
 **Session died mid-training.**
 Re-run the same command. Set `time_budget_min` a bit below your typical session length

@@ -135,6 +135,8 @@ def cmd_verify(args):
 
 def cmd_train(args):
     ws, cfg = _ws(args), _cfg(args)
+    import torch
+
     from .train import train_arm
 
     device = _device()
@@ -143,9 +145,22 @@ def cmd_train(args):
     results = []
     for seed in seeds:
         for arm in arms:
-            results.append(asdict(train_arm(
-                cfg, arm, seed, ws, device=device, resume=not args.restart,
-                ignore_memory_check=args.ignore_memory_check)))
+            try:
+                results.append(asdict(train_arm(
+                    cfg, arm, seed, ws, device=device, resume=not args.restart,
+                    ignore_memory_check=args.ignore_memory_check)))
+            except torch.cuda.OutOfMemoryError:
+                # Release before re-raising: otherwise the traceback pins the failed
+                # model and every later arm OOMs too, for no reason.
+                from .train import release_cuda
+
+                release_cuda()
+                log.error(
+                    "%s ran out of memory. Lower `batch_size` and raise `grad_accum` to "
+                    "match in the config, then re-run — finished arms are skipped.",
+                    cfg.run_name(arm.name, seed),
+                )
+                raise
     write_json(ws["results"] / "training_summary.json", results)
     for r in results:
         print(f"{r['run_name']:44s} trainable={r['trainable_params']:>12,} "

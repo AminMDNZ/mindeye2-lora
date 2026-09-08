@@ -17,7 +17,10 @@ blurry_recon: false
 use_prior: true
 
 epochs: 150
-batch_size: 24
+# 4096-hidden activations are ~4x the 1024 config; check the preflight estimate and
+# raise batch_size (lowering grad_accum to match) if the A100 has room.
+batch_size: 8
+grad_accum: 3
 lr: 3.0e-4
 precision: bf16
 # At hidden_dim=4096 the model is ~2.1B params and full fine-tuning is optimiser-state

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from mindeye_lora.capacity import estimate_memory, preflight
+from mindeye_lora.capacity import estimate_memory, preflight, suggest_batch_size
 
 
 # --------------------------------------------------------------------------------------
@@ -12,9 +12,26 @@ def test_lora_is_far_cheaper_than_full_at_paper_scale():
     total = 2_100_000_000
     full = estimate_memory(total, total, "adamw")
     lora = estimate_memory(total, 70_000_000, "adamw")
-    assert full.total_bytes > 3 * lora.total_bytes
+    assert full.total_bytes > 2 * lora.total_bytes
     # the gap is optimiser state, not parameters — that is the whole point
     assert full.optimizer_bytes > 20 * lora.optimizer_bytes
+
+
+def test_activations_scale_with_batch_and_dominate_at_large_batch():
+    """The T4 OOM this estimator failed to predict was activations, not weights."""
+    small = estimate_memory(729_327_896, 16_102_400, "adamw", batch_size=4)
+    large = estimate_memory(729_327_896, 16_102_400, "adamw", batch_size=24)
+    assert large.activation_bytes > 5 * small.activation_bytes
+    # at batch 24 the frozen arm must be predicted NOT to fit a 14.6 GB T4
+    assert large.total_bytes > 13.1 * 1024**3
+
+
+def test_suggest_batch_size_preserves_effective_batch():
+    bs, accum = suggest_batch_size(
+        729_327_896, 16_102_400, "adamw", capacity=int(14.56 * 1024**3)
+    )
+    assert bs * accum == 24
+    assert bs < 24
 
 
 def test_8bit_optimizer_cuts_moment_memory_fourfold():

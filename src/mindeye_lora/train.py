@@ -229,6 +229,7 @@ def train_arm(
         trainable_params=info["freeze"]["trainable_params"],
         optimizer=getattr(cfg, "optimizer", "adamw"),
         strict=not ignore_memory_check,
+        batch_size=cfg.batch_size,
     )
     info["memory_estimate"] = est.__dict__ | {"total_bytes": est.total_bytes}
 
@@ -280,6 +281,7 @@ def train_arm(
              f"{info['freeze']['trainable_params']:,}", cfg.epochs, steps_per_epoch)
 
     model.train()
+    _failed = False
     for epoch in range(start_epoch, cfg.epochs):
         t_epoch = time.time()
         use_mixco = epoch < mixup_epochs
@@ -416,6 +418,24 @@ def train_arm(
     del model, opt
     torch.cuda.empty_cache()
     return result
+
+
+def release_cuda(*objects) -> None:
+    """Drop references and empty the allocator cache.
+
+    A CUDA OOM inside a notebook is sticky: the exception's traceback holds every local
+    in every frame, including the model that just failed, so the next attempt starts
+    with the GPU still full. Freeing explicitly at the point of failure means a smaller
+    batch size can actually be tried without restarting the runtime.
+    """
+    import gc
+
+    for obj in objects:
+        del obj
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 def _save_state(path, model, opt, sched, scaler, epoch, global_step, train_seconds, arm) -> None:

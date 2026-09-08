@@ -151,6 +151,10 @@ def setup_environment(
     # pip wheel cache -> reinstalls after a runtime reset are near-instant
     os.environ["PIP_CACHE_DIR"] = str(paths["cache_pip"])
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    # Reduces allocator fragmentation, which matters on a 16 GB card where the diffusion
+    # prior's attention allocates and frees large blocks every step. Only takes effect if
+    # set before CUDA initialises, which is why it lives here rather than in the trainer.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     ws = Workspace(root=root, paths=paths)
 

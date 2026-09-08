@@ -188,6 +188,46 @@ def read_behav_tar(path: Path) -> np.ndarray:
 # --------------------------------------------------------------------------------------
 # checkpoint slimming
 # --------------------------------------------------------------------------------------
+class _Placeholder:
+    """Stand-in for a class we cannot import. Only tensors survive slimming anyway."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __setstate__(self, state):
+        if isinstance(state, dict):
+            self.__dict__.update(state)
+
+
+class _TolerantUnpickler:
+    """Unpickle checkpoints referencing classes we do not have installed.
+
+    The published checkpoints were saved under DeepSpeed, so the pickle names
+    `deepspeed.runtime.zero.config.ZeroStageEnum` and friends. Installing DeepSpeed
+    purely to reconstruct objects we discard a moment later would be absurd, so
+    unknown classes become placeholders and are dropped when we keep only tensors.
+    """
+
+    def __init__(self):
+        import pickle
+
+        outer = self
+
+        class Unpickler(pickle.Unpickler):
+            def find_class(self, mod, name):
+                try:
+                    return super().find_class(mod, name)
+                except (ModuleNotFoundError, AttributeError, ImportError):
+                    outer.substituted.add(f"{mod}.{name}")
+                    return type(name, (_Placeholder,), {})
+
+        self.substituted: set[str] = set()
+        self.Unpickler = Unpickler
+        self.load = pickle.load
+        self.Pickler = pickle.Pickler
+        self.dump = pickle.dump
+
+
 def slim_checkpoint(src: Path, dst: Path) -> Path:
     """Keep only fp32 model weights; drop DeepSpeed optimizer/scheduler state."""
     import torch
@@ -195,7 +235,17 @@ def slim_checkpoint(src: Path, dst: Path) -> Path:
     if dst.exists():
         return dst
     log.info("Slimming %s (%s) ...", src.name, human_bytes(src.stat().st_size))
-    ckpt = torch.load(src, map_location="cpu", weights_only=False)
+
+    tolerant = _TolerantUnpickler()
+    try:
+        ckpt = torch.load(src, map_location="cpu", weights_only=False,
+                          pickle_module=tolerant)
+    except TypeError:  # torch too old to accept pickle_module here
+        ckpt = torch.load(src, map_location="cpu", weights_only=False)
+    if tolerant.substituted:
+        log.info("  ignored %d unavailable classes (e.g. %s)",
+                 len(tolerant.substituted), sorted(tolerant.substituted)[0])
+
     if isinstance(ckpt, dict):
         for key in ("model_state_dict", "module", "state_dict"):
             if key in ckpt and isinstance(ckpt[key], dict):
@@ -211,11 +261,16 @@ def slim_checkpoint(src: Path, dst: Path) -> Path:
         for prefix in ("module.", "_orig_mod.", "model."):
             if k.startswith(prefix):
                 k = k[len(prefix):]
-        clean[k] = v.float() if hasattr(v, "float") else v
+        if torch.is_tensor(v):        # placeholders and scalars are discarded here
+            clean[k] = v.float()
+
+    if not clean:
+        raise RuntimeError(f"No tensors recovered from {src}; checkpoint layout changed.")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"model_state_dict": clean, "source": src.name}, dst)
-    log.info("  -> %s (%s)", dst.name, human_bytes(dst.stat().st_size))
+    log.info("  -> %s (%s, %d tensors)", dst.name,
+             human_bytes(dst.stat().st_size), len(clean))
     return dst
 
 

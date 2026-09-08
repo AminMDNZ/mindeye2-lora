@@ -49,6 +49,29 @@ DALLE2_SUPPORT_REQS = [
     "embedding-reader",
 ]
 
+# Upstream's models.py imports utils.py, which imports the vendored `generative_models`
+# (sgm) at module level -- so these are needed even when no image decoder is used.
+UPSTREAM_IMPORT_REQS = [
+    "pytorch-lightning",
+    "lightning-utilities",
+    "torchmetrics",
+    "omegaconf",
+    "diffusers",
+    "transformers",
+]
+
+# import name -> pip package, where the two differ
+IMPORT_TO_PKG = {
+    "pytorch_lightning": "pytorch-lightning", "lightning_utilities": "lightning-utilities",
+    "pytorch_warmup": "pytorch-warmup", "embedding_reader": "embedding-reader",
+    "ema_pytorch": "ema-pytorch", "einops_exts": "einops-exts",
+    "rotary_embedding_torch": "rotary-embedding-torch", "x_clip": "x-clip",
+    "coca_pytorch": "coca-pytorch", "clip": "clip-anytorch",
+    "resize_right": "resize-right", "vector_quantize_pytorch": "vector-quantize-pytorch",
+    "PIL": "pillow", "sklearn": "scikit-learn", "skimage": "scikit-image",
+    "yaml": "pyyaml", "cv2": "opencv-python-headless",
+}
+
 
 def _pip(args: list[str]) -> None:
     cmd = [sys.executable, "-m", "pip", "install", "-q", *args]
@@ -95,6 +118,116 @@ def clone_or_update(dest: Path, ref: str = "main", update: bool = False) -> Path
     return repo
 
 
+def _install(pkg: str) -> None:
+    # --no-deps everywhere: nothing here may replace Colab's torch build
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "--no-deps", pkg], check=False
+    )
+
+
+def patch_diffusers_vae() -> None:
+    """Alias `diffusers.models.vae`, which modern diffusers moved.
+
+    Upstream's models.py does `from diffusers.models.vae import Decoder`. Recent
+    diffusers relocated that to `diffusers.models.autoencoders.vae`. Aliasing beats
+    pinning an ancient diffusers release, and `Decoder` is only used by the low-level
+    blurry-recon branch, which this project leaves disabled.
+    """
+    if "diffusers.models.vae" in sys.modules:
+        return
+    try:
+        importlib.import_module("diffusers")
+    except ModuleNotFoundError:
+        _install("diffusers")
+    for path in ("diffusers.models.vae", "diffusers.models.autoencoders.vae"):
+        try:
+            real = importlib.import_module(path)
+        except ModuleNotFoundError:
+            continue
+        if path != "diffusers.models.vae":
+            shim = ModuleType("diffusers.models.vae")
+            for name in dir(real):
+                if not name.startswith("_"):
+                    setattr(shim, name, getattr(real, name))
+            sys.modules["diffusers.models.vae"] = shim
+            log.info("aliased diffusers.models.vae -> %s", path)
+        return
+    log.warning("Could not locate the diffusers VAE module; blurry_recon will not work.")
+
+
+def import_with_autoinstall(module: str, max_installs: int = 25) -> ModuleType:
+    """Import `module`, installing missing dependencies as they surface.
+
+    Stops if the same module goes missing twice: that means a *moved* import path
+    rather than an absent package, which pip cannot fix and which needs a shim.
+    """
+    seen: set[str] = set()
+    for _ in range(max_installs):
+        try:
+            importlib.invalidate_caches()
+            return importlib.import_module(module)
+        except ModuleNotFoundError as exc:
+            name = exc.name or ""
+            if not name or name == module:
+                raise
+            if name in seen:
+                raise ModuleNotFoundError(
+                    f"'{name}' is still missing after installing it. This is a renamed "
+                    f"or relocated module, not an absent package, and needs an explicit "
+                    f"alias (see patch_diffusers_vae for the pattern).",
+                    name=name,
+                ) from exc
+            seen.add(name)
+            pkg = IMPORT_TO_PKG.get(name, name.replace("_", "-"))
+            log.info("  %s needs %r -> installing %s", module, name, pkg)
+            _install(pkg)
+    raise RuntimeError(f"{module} unresolved after {max_installs} installs")
+
+
+def extract_ridge_regression(repo: Path):
+    """Pull `RidgeRegression` out of Train.ipynb.
+
+    Upstream defines it inline in the training notebook rather than in models.py, so
+    it cannot simply be imported. Executing the original source keeps the parameter
+    names (`linears.N.weight`) byte-identical to the published checkpoint, which a
+    reimplementation could silently get wrong.
+    """
+    import json
+
+    import torch
+    import torch.nn as nn
+
+    for nb_name in ("Train.ipynb", "recon_inference.ipynb"):
+        nb_path = repo / "src" / nb_name
+        if not nb_path.exists():
+            continue
+        nb = json.loads(nb_path.read_text())
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") != "code":
+                continue
+            source = "".join(cell["source"])
+            if "class RidgeRegression" not in source:
+                continue
+            body, inside = [], False
+            for line in source.split("\n"):
+                if line.startswith("class RidgeRegression"):
+                    inside = True
+                elif inside and line and not line[0].isspace():
+                    break          # dedent to column 0 ends the class
+                if inside:
+                    body.append(line)
+            namespace = {"torch": torch, "nn": nn}
+            exec("\n".join(body), namespace)          # noqa: S102 - upstream's own source
+            cls = namespace.get("RidgeRegression")
+            if cls is not None:
+                log.info("extracted RidgeRegression from %s", nb_name)
+                return cls
+    raise AttributeError(
+        "RidgeRegression not found in models.py or in Train.ipynb/recon_inference.ipynb. "
+        "Pin a known-good revision with --upstream_ref=<sha>."
+    )
+
+
 class Upstream:
     """Handle to the imported upstream modules."""
 
@@ -125,18 +258,23 @@ def load_upstream(workspace_upstream_dir: Path, ref: str = "main", update: bool 
         sys.path.insert(0, str(src))
 
     ensure_dalle2()
+    patch_diffusers_vae()
 
-    models = importlib.import_module("models")
+    models = import_with_autoinstall("models")
     try:
-        upstream_utils = importlib.import_module("utils")
+        upstream_utils = import_with_autoinstall("utils")
     except Exception as exc:  # upstream utils pulls optional deps in some revisions
         log.warning("Upstream utils.py not importable (%s); using local loss implementations.", exc)
         upstream_utils = None
 
+    # RidgeRegression lives in Train.ipynb rather than models.py, so graft it on.
+    if not hasattr(models, "RidgeRegression"):
+        models.RidgeRegression = extract_ridge_regression(repo)
+
     for required in ("RidgeRegression", "BrainNetwork", "PriorNetwork", "BrainDiffusionPrior"):
         if not hasattr(models, required):
             raise AttributeError(
-                f"Upstream models.py has no `{required}`. Pin a known-good revision with "
+                f"Upstream provides no `{required}`. Pin a known-good revision with "
                 f"--upstream_ref=<sha>."
             )
 

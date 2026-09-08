@@ -104,6 +104,17 @@ CONFIG = "configs/smoke.yaml"     # switch to configs/colab_t4.yaml for the real
 main(["setup", "--config", CONFIG])
 """),
 
+code("""
+# what you actually got — Pro gives priority, not a guarantee
+import torch
+if torch.cuda.is_available():
+    p = torch.cuda.get_device_properties(0)
+    free, total = torch.cuda.mem_get_info()
+    print(f"{p.name}  {total/1024**3:.1f} GB total, {free/1024**3:.1f} GB free")
+else:
+    print("NO GPU — Runtime > Change runtime type > GPU")
+"""),
+
 md("""
 ## 3. Which config
 
@@ -184,6 +195,12 @@ magnitude — that line is the experiment in miniature.
 State is saved to Drive every 10 minutes and at each epoch boundary, and
 `time_budget_min` stops cleanly before a session is likely to be reclaimed. Re-run this
 cell next session to continue.
+
+A memory preflight runs before each arm and refuses runs it predicts will not fit,
+naming a `batch_size` / `grad_accum` pair that should. The shipped configs use
+`batch_size: 6, grad_accum: 4` — an effective batch of 24, matching the paper, split
+because the diffusion prior's attention allocates a `[batch, 32 heads, 257, 257]`
+similarity matrix per layer and OOMs a T4 at batch 24.
 """),
 code("""
 main(["train", "--config", CONFIG])
@@ -278,6 +295,24 @@ for p in sorted(figdir.glob("*.png")):
 
 md("""
 ---
+
+## If something breaks
+
+**`NameError: name 'main' is not defined`** — the kernel restarted. Re-run cell 2.
+
+**CUDA out of memory.** The error names a `batch_size` / `grad_accum` pair that should
+fit; apply it in the config, keeping the product at 24. Then **restart the runtime**
+before retrying: a CUDA OOM in a notebook is sticky, because the traceback holds every
+local in every frame including the model that just failed, so a retry often OOMs before
+training even starts. Nothing on Drive is lost.
+
+**Anything about a missing module.** `colab_setup.sh` resolves missing packages
+automatically. If it reports the *same* module twice, that is a moved import path rather
+than an absent package and needs a code fix, not another install.
+
+**`Refusing to run: the 'pretrained' baseline would be fake`.** Upstream's architecture
+no longer matches the checkpoint. Do not work around this — it would mean training from
+scratch while calling it fine-tuning. Pin a revision with `--upstream_ref=<sha>`.
 
 ## Reading the report
 

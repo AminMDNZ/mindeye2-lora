@@ -20,8 +20,11 @@ upstream_ref: main
 clip_backend: open_clip
 
 epochs: 150
-batch_size: 24
-grad_accum: 1
+# batch_size x grad_accum = 24, matching the paper's effective batch. Split this way
+# because the diffusion prior's attention allocates a [batch, 32 heads, 257, 257]
+# similarity matrix per layer, which OOMs a T4 at batch 24 regardless of arm.
+batch_size: 6
+grad_accum: 4
 lr: 3.0e-4            # paper's max_lr for full fine-tuning; PEFT arms override below
 weight_decay: 1.0e-2
 mixup_pct: 0.33
@@ -29,6 +32,10 @@ prior_scale: 30.0
 clip_scale: 1.0
 max_grad_norm: 1.0
 precision: fp16
+# 8-bit moments are required for the full arm on a 16 GB card: at 729M parameters,
+# fp32 AdamW needs ~11.7 GB for params + grads + moments alone. Applied to EVERY arm,
+# since using it for one would confound the comparison with an optimiser change.
+optimizer: adamw8bit
 num_workers: 2
 warmup_pct: 0.02
 
