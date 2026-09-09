@@ -101,8 +101,43 @@ def cmd_setup(args):
     print("arms:", ", ".join(a.name for a in cfg.arms))
 
 
+# Rough model size per pretrained checkpoint, used only to refuse an obviously
+# impossible run before spending ten minutes downloading it.
+PRETRAIN_MIN_VRAM_GB = {"multisubject_1024": 12.0, "multisubject_4096": 24.0,
+                        "reference_1sess": 12.0}
+
+
+def _check_gpu_fits_config(cfg, force: bool = False) -> None:
+    """Refuse a paper-scale config on a small GPU before the download, not after.
+
+    The 4096 checkpoint is ~10 GB to fetch and the model needs ~23 GB to fine-tune even
+    with 8-bit moments. Discovering that after the download wastes both time and, on a
+    paid runtime, compute units.
+    """
+    from .capacity import gpu_capacity_bytes
+
+    need = PRETRAIN_MIN_VRAM_GB.get(cfg.pretrain)
+    capacity = gpu_capacity_bytes()
+    if need is None or capacity is None:
+        return
+    have = capacity / 1024**3
+    if have + 0.5 < need:
+        message = (
+            f"`pretrain: {cfg.pretrain}` needs roughly {need:.0f} GB of VRAM but this "
+            f"GPU has {have:.1f} GB.\n"
+            f"  Switch to configs/colab_t4.yaml (pretrain: multisubject_1024), or "
+            f"request an A100 runtime.\n"
+            f"  Pass --ignore-memory-check to proceed anyway."
+        )
+        if force:
+            log.warning(message)
+        else:
+            raise RuntimeError(message)
+
+
 def cmd_assets(args):
     ws, cfg = _ws(args), _cfg(args)
+    _check_gpu_fits_config(cfg, force=args.ignore_memory_check)
     from .assets import prepare_assets
 
     paths = prepare_assets(
@@ -653,6 +688,9 @@ def build_parser() -> argparse.ArgumentParser:
     add("setup").set_defaults(func=cmd_setup)
 
     a = add("assets")
+    a.add_argument("--ignore-memory-check", action="store_true",
+                   dest="ignore_memory_check",
+                   help="download even if this GPU cannot hold the chosen model")
     a.add_argument("--full-hdf5", action="store_true",
                    help="download the complete HDF5 files instead of streaming row subsets")
     a.add_argument("--force", action="store_true")

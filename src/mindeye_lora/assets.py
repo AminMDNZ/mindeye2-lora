@@ -301,33 +301,43 @@ class _Placeholder:
             self.__dict__.update(state)
 
 
-class _TolerantUnpickler:
-    """Unpickle checkpoints referencing classes we do not have installed.
+def _tolerant_pickle_module():
+    """A stand-in for the `pickle` module that survives unknown classes.
 
-    The published checkpoints were saved under DeepSpeed, so the pickle names
-    `deepspeed.runtime.zero.config.ZeroStageEnum` and friends. Installing DeepSpeed
-    purely to reconstruct objects we discard a moment later would be absurd, so
-    unknown classes become placeholders and are dropped when we keep only tensors.
+    Returned as a real `ModuleType`, not a class instance: `torch.load` inspects
+    `pickle_module.__name__` to detect dill, so anything without that attribute raises
+    `AttributeError` before deserialisation even begins.
+
+    The published checkpoints were saved under DeepSpeed and name classes like
+    `deepspeed.runtime.zero.config.ZeroStageEnum`. Installing DeepSpeed purely to
+    rebuild objects we discard a moment later would be absurd, so unknown classes become
+    placeholders and are dropped when only tensors are kept. `substituted` records what
+    was swapped, for the log.
     """
+    import pickle
+    from types import ModuleType
 
-    def __init__(self):
-        import pickle
+    module = ModuleType("tolerant_pickle")
+    module.substituted = set()
 
-        outer = self
+    class Unpickler(pickle.Unpickler):
+        def find_class(self, mod, name):
+            try:
+                return super().find_class(mod, name)
+            except (ModuleNotFoundError, AttributeError, ImportError):
+                module.substituted.add(f"{mod}.{name}")
+                return type(name, (_Placeholder,), {})
 
-        class Unpickler(pickle.Unpickler):
-            def find_class(self, mod, name):
-                try:
-                    return super().find_class(mod, name)
-                except (ModuleNotFoundError, AttributeError, ImportError):
-                    outer.substituted.add(f"{mod}.{name}")
-                    return type(name, (_Placeholder,), {})
-
-        self.substituted: set[str] = set()
-        self.Unpickler = Unpickler
-        self.load = pickle.load
-        self.Pickler = pickle.Pickler
-        self.dump = pickle.dump
+    module.Unpickler = Unpickler
+    module.load = pickle.load
+    module.loads = pickle.loads
+    module.Pickler = pickle.Pickler
+    module.dump = pickle.dump
+    module.dumps = pickle.dumps
+    module.HIGHEST_PROTOCOL = pickle.HIGHEST_PROTOCOL
+    module.DEFAULT_PROTOCOL = pickle.DEFAULT_PROTOCOL
+    module.UnpicklingError = pickle.UnpicklingError
+    return module
 
 
 def slim_checkpoint(src: Path, dst: Path) -> Path:
@@ -338,11 +348,14 @@ def slim_checkpoint(src: Path, dst: Path) -> Path:
         return dst
     log.info("Slimming %s (%s) ...", src.name, human_bytes(src.stat().st_size))
 
-    tolerant = _TolerantUnpickler()
+    tolerant = _tolerant_pickle_module()
     try:
         ckpt = torch.load(src, map_location="cpu", weights_only=False,
                           pickle_module=tolerant)
-    except TypeError:  # torch too old to accept pickle_module here
+    except Exception as exc:
+        # Fall back to a plain load: it will fail loudly if a class really is needed,
+        # which is a better error than a confusing one from the tolerant path.
+        log.warning("tolerant load failed (%s); retrying with the standard unpickler", exc)
         ckpt = torch.load(src, map_location="cpu", weights_only=False)
     if tolerant.substituted:
         log.info("  ignored %d unavailable classes (e.g. %s)",
