@@ -282,6 +282,20 @@ def build_diffusion_engine(
                      torch.cuda.memory_allocated() / 1024**3,
                      torch.cuda.mem_get_info()[0] / 1024**3)
         load_sharded_state_dict(engine, ckpt_path)
+
+        # The VAE decoder runs outside autocast: sgm's `decode_first_stage` honours
+        # `disable_first_stage_autocast`, so it receives fp32 latents from the sampler
+        # while its own weights are fp16 -- "Input type (float) and bias type
+        # (c10::Half) should be the same". It is only 84M parameters (~0.3 GB in fp32),
+        # so keeping it at full precision is the cheap and correct fix, and it avoids
+        # fp16 artefacts in the final pixels.
+        if hasattr(engine, "first_stage_model"):
+            engine.first_stage_model = engine.first_stage_model.float()
+            log.info("first stage (VAE) kept in fp32 for decoding")
+        if torch.cuda.is_available():
+            log.info("decoder ready: %.1f GB allocated, %.1f GB free",
+                     torch.cuda.memory_allocated() / 1024**3,
+                     torch.cuda.mem_get_info()[0] / 1024**3)
     else:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         engine.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
@@ -339,7 +353,19 @@ def unclip_reconstruct(
             bar.update(start_at)
         for start in range(start_at, len(clip_embeddings), batch_size):
             chunk = clip_embeddings[start : start + batch_size].to(device)
-            samples = upstream_utils.unclip_recon(chunk, engine, vector_suffix, num_samples=1)
+            try:
+                samples = upstream_utils.unclip_recon(chunk, engine, vector_suffix,
+                                                      num_samples=1)
+            except RuntimeError as exc:
+                if "should be the same" not in str(exc):
+                    raise
+                # A dtype boundary we did not anticipate. Promote the first stage to
+                # fp32 and retry once rather than losing the whole run.
+                log.warning("dtype mismatch during decode (%s); promoting first stage "
+                            "to fp32 and retrying", exc)
+                engine.first_stage_model = engine.first_stage_model.float()
+                samples = upstream_utils.unclip_recon(chunk, engine, vector_suffix,
+                                                      num_samples=1)
             outs.append(samples.float().cpu())
             done = min(start + batch_size, len(clip_embeddings))
             bar.update(done - start)
