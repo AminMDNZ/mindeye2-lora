@@ -108,28 +108,41 @@ main(["setup", "--config", CONFIG])
 """),
 
 code("""
-# what you actually got — Pro gives priority, not a guarantee
+# What you actually got. Colab assigns GPUs; Pro gives priority, not a guarantee.
 import torch
-if torch.cuda.is_available():
+
+if not torch.cuda.is_available():
+    print("NO GPU — Runtime > Change runtime type > GPU")
+else:
     p = torch.cuda.get_device_properties(0)
     free, total = torch.cuda.mem_get_info()
-    print(f"{p.name}  {total/1024**3:.1f} GB total, {free/1024**3:.1f} GB free")
-else:
-    print("NO GPU — Runtime > Change runtime type > GPU")
+    gb = total / 1024**3
+    print(f"{p.name} — {gb:.1f} GB total, {free/1024**3:.1f} GB free")
+    if gb < 24:
+        print("  -> use configs/colab_t4.yaml (hidden_dim=1024).")
+        print("     configs/a100_paper_scale.yaml needs ~24 GB and will be refused.")
+    else:
+        print("  -> configs/a100_paper_scale.yaml will fit (hidden_dim=4096).")
 """),
 
 md("""
 ## 3. Which config
 
-| config | runtime | time |
+| config | needs | what it gives you |
 |---|---|---|
-| `configs/smoke.yaml` | any GPU | ~30 min — **start here** |
-| `configs/colab_t4.yaml` | T4 (free) | several hours across sessions |
-| `configs/a100_paper_scale.yaml` | A100 (Pro) | also `!pip install bitsandbytes` |
+| `configs/smoke.yaml` | any GPU, ~30 min | proof the pipeline runs — **start here** |
+| `configs/colab_t4.yaml` | 15 GB, hours | **the actual experiment**: 6 arms x 3 seeds x 150 epochs |
+| `configs/a100_paper_scale.yaml` | 24 GB+, `bitsandbytes` | efficiency numbers at 4096 (2.1B params) |
 
-The smoke config runs 3 arms for 10 epochs and exercises every stage, so problems
-surface in minutes rather than hours. Nothing it downloads is wasted — assets and CLIP
-embeddings are cached on Drive and reused by the full run.
+**The T4 config is the experiment, not a fallback.** It produces the complete result:
+retention ratio, equivalence test, six arms, three seeds. The A100 config answers a
+different question — at `hidden_dim=4096` the gap between LoRA and full fine-tuning
+becomes ~23 GB vs ~11 GB of VRAM and ~8 GB vs a few MB per subject. Compelling for a
+writeup, but a supplement rather than the finding.
+
+You cannot force an A100; Colab assigns them. Run the T4 experiment and treat a large
+GPU as a bonus. `assets` refuses a config the current GPU cannot hold, before spending
+ten minutes on a ~10 GB download.
 
 To switch, edit `CONFIG` in the cell above and re-run it.
 
@@ -370,6 +383,13 @@ batches, and SDXL decoding per ~3 batches. Re-run the same command and it contin
 **Nothing needs deleting after a crash.** Checkpoints are written durably and kept in
 two generations; a corrupt one falls back to its backup, and if both are bad they are
 removed automatically and that stage restarts. Re-run the same command.
+
+**"needs roughly 24 GB of VRAM but this GPU has 15.0 GB".** You are on a T4 or L4 and
+selected the paper-scale config. Switch `CONFIG` to `configs/colab_t4.yaml`.
+
+**"Your session crashed after using all available RAM".** That is the VM's 12 GB system
+memory, not the GPU. `predict` streams to disk so it should not recur; if it does, try
+`--num_workers 0`.
 
 **Is it stuck?** Check the GPU from a second cell:
 `!nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader`.
