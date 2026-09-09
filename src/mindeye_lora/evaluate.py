@@ -144,6 +144,22 @@ class PredictionStore:
         out["_meta"] = meta
         return out
 
+    @staticmethod
+    def embedding(preds: dict):
+        """The predicted embedding: the prior's output if present, else clip_voxels.
+
+        Written as an explicit branch because `preds.get("prior", preds["clip_voxels"])`
+        evaluates its default eagerly and raises KeyError when the store only holds the
+        prior — which is the normal case, since clip_voxels is not written when a prior
+        is available.
+        """
+        for field in ("prior", "clip_voxels"):
+            if field in preds:
+                return preds[field]
+        raise KeyError(
+            f"prediction store has no embedding field; found {sorted(preds)}"
+        )
+
     @classmethod
     def is_complete(cls, directory) -> bool:
         meta = read_json(Path(directory) / "meta.json", default=None)

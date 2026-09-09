@@ -208,7 +208,7 @@ def reconstruct_for_run(
 
     preds = PredictionStore.load(predictions_path)
     # Slice first, then materialise: the store is a memmap and the full array is ~1.7 GB.
-    source = preds.get("prior", preds["clip_voxels"])
+    source = PredictionStore.embedding(preds)
     emb = torch.from_numpy(np.ascontiguousarray(source[:n_images])).float()
     rows = torch.from_numpy(np.asarray(preds["rows"][:n_images]))
 

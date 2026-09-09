@@ -336,7 +336,7 @@ def cmd_evaluate(args):
                 log.info("metrics exist for %s", run_dir.name)
                 continue
             preds = PredictionStore.load(store_dir)
-            pred_emb = preds.get("prior", preds["clip_voxels"])
+            pred_emb = PredictionStore.embedding(preds)
             metrics = embedding_metrics(pred_emb, preds["target"])
             summary = retrieval_summary(pred_emb, preds["target"])
 

@@ -28,16 +28,17 @@ import torch.nn.functional as F
 from .utils import log
 
 
-def retrieve_topk(
-    pred: torch.Tensor, target: torch.Tensor, k: int = 3
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def retrieve_topk(pred, target, k: int = 3) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Nearest neighbours of each prediction among all target embeddings.
 
-    Returns (indices [N, k], similarities [N, k], rank_of_truth [N]) where a rank of 0
-    means the correct image was retrieved first.
+    Accepts torch tensors or memmapped arrays. Returns (indices [N, k],
+    similarities [N, k], rank_of_truth [N]); a rank of 0 means the correct image was
+    retrieved first.
     """
-    p = F.normalize(pred.flatten(1).float(), dim=-1)
-    t = F.normalize(target.flatten(1).float(), dim=-1)
+    from .evaluate import _flat_norm
+
+    p = _flat_norm(pred)
+    t = _flat_norm(target)
     sim = p @ t.T
     k = min(k, sim.shape[1])
     top = sim.topk(k, dim=-1)
@@ -56,9 +57,10 @@ def build_retrieval_output(
     from .evaluate import PredictionStore
 
     preds = PredictionStore.load(store_dir)
-    pred_emb = torch.from_numpy(np.ascontiguousarray(
-        preds.get("prior", preds["clip_voxels"])))
-    target = torch.from_numpy(np.ascontiguousarray(preds["target"]))
+    # Memmaps, not arrays: retrieve_topk normalises them in chunks, so the full
+    # 1.7 GB embedding tensor is never materialised.
+    pred_emb = PredictionStore.embedding(preds)
+    target = preds["target"]
     rows = torch.from_numpy(np.asarray(preds["rows"]))
 
     indices, sims, rank = retrieve_topk(pred_emb, target, k=k)
