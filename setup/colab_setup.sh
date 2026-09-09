@@ -62,21 +62,39 @@ PKG = {
     "coca_pytorch": "coca-pytorch", "clip": "clip-anytorch",
     "resize_right": "resize-right", "vector_quantize_pytorch": "vector-quantize-pytorch",
     "PIL": "pillow", "sklearn": "scikit-learn", "cv2": "opencv-python-headless",
+    "pytorch_lightning": "pytorch-lightning", "lightning_utilities": "lightning-utilities",
+    "lightning_fabric": "pytorch-lightning", "torchmetrics": "torchmetrics",
+    "skimage": "scikit-image", "yaml": "pyyaml", "omegaconf": "omegaconf",
+    "safetensors": "safetensors", "transformers": "transformers",
+    "huggingface_hub": "huggingface-hub", "open_clip": "open-clip-torch",
+    "dalle2_pytorch": "dalle2-pytorch",
 }
 
-def ensure(module: str, label: str, max_installs: int = 15) -> None:
+def ensure(module: str, label: str, max_installs: int = 15, required: bool = True) -> bool:
+    """Import `module`, installing whatever is missing along the way.
+
+    Tracks which module names have already been installed once. A name that goes
+    missing twice means a *moved* import path rather than an absent package, which pip
+    cannot fix; giving up then avoids a pointless install loop. The module being
+    imported is treated no differently from its dependencies -- an earlier version
+    bailed out immediately when the top-level module was absent, which defeated the
+    point of the function.
+    """
+    tried: set[str] = set()
     for attempt in range(max_installs):
         try:
             importlib.invalidate_caches()
             importlib.import_module(module)
             extra = f" (resolved {attempt} missing import{'s' if attempt != 1 else ''})"
             print(f"{label} OK{extra if attempt else ''}")
-            return
+            return True
         except ModuleNotFoundError as exc:
-            name = exc.name or ""
-            if not name or name == module:
-                print(f"{label} FAILED: {exc}")
-                sys.exit(1)
+            name = exc.name or module
+            if name in tried:
+                print(f"{label} FAILED: {name!r} still missing after installing it. "
+                      f"This is a renamed or relocated module, not an absent package.")
+                break
+            tried.add(name)
             pkg = PKG.get(name, name.replace("_", "-"))
             print(f"  {label}: missing {name!r} -> installing {pkg}")
             subprocess.run(
@@ -84,17 +102,26 @@ def ensure(module: str, label: str, max_installs: int = 15) -> None:
                 check=False,
             )
         except Exception as exc:
-            print(f"{label} FAILED: {exc}")
-            sys.exit(1)
-    print(f"{label} FAILED: unresolved after {max_installs} installs")
-    sys.exit(1)
+            print(f"{label} FAILED: {type(exc).__name__}: {exc}")
+            break
+    else:
+        print(f"{label} FAILED: unresolved after {max_installs} installs")
+    if required:
+        sys.exit(1)
+    print(f"  ({label} is optional; continuing without it)")
+    return False
 
+# Required: without these nothing runs.
 ensure("dalle2_pytorch", "dalle2_pytorch")
-ensure("pytorch_lightning", "pytorch_lightning")
-ensure("diffusers", "diffusers")
 ensure("open_clip", "open_clip")
 ensure("h5py", "h5py")
 ensure("fsspec", "fsspec")
+
+# Needed to import upstream's models.py, which imports utils.py, which imports the
+# vendored sgm at module level. Not fatal here if it fails -- `upstream.py` retries the
+# same resolution at load time, and the failure is far more informative there.
+ensure("diffusers", "diffusers", required=False)
+ensure("pytorch_lightning", "pytorch_lightning", required=False)
 PY
 
 echo "✔ environment ready"

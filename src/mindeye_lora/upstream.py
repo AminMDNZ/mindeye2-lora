@@ -101,6 +101,29 @@ def ensure_dalle2(verbose: bool = True) -> ModuleType:
         ) from exc
 
 
+def preinstall_upstream_reqs() -> None:
+    """Install what upstream's import chain needs, before touching it.
+
+    models.py imports utils.py, which imports the vendored sgm at module level, which
+    needs pytorch_lightning. Resolving that one ModuleNotFoundError at a time works but
+    is slow and noisy, so install the known set up front and let
+    `import_with_autoinstall` mop up whatever is left.
+    """
+    module_for = {"pytorch-lightning": "pytorch_lightning",
+                  "lightning-utilities": "lightning_utilities"}
+    missing = []
+    for pkg in UPSTREAM_IMPORT_REQS:
+        mod = module_for.get(pkg, pkg.replace("-", "_"))
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        log.info("installing upstream import requirements: %s", ", ".join(missing))
+        for pkg in missing:
+            _install(pkg)
+
+
 def clone_or_update(dest: Path, ref: str = "main", update: bool = False) -> Path:
     """Clone MindEyeV2 into `dest/MindEyeV2` (idempotent)."""
     repo = Path(dest) / "MindEyeV2"
@@ -258,6 +281,7 @@ def load_upstream(workspace_upstream_dir: Path, ref: str = "main", update: bool 
         sys.path.insert(0, str(src))
 
     ensure_dalle2()
+    preinstall_upstream_reqs()
     patch_diffusers_vae()
 
     models = import_with_autoinstall("models")
