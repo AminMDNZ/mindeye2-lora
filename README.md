@@ -126,6 +126,11 @@ The full HF dataset is 215 GB. Two tricks get the working set to about 3.5 GB:
    images, so instead of downloading the 22 GB `coco_images_224_float16.hdf5` we open it
    over HTTPS with fsspec and pull only the rows we need. Same for the 1.89 GB betas
    file. Pass `--full-hdf5` if you'd rather have local copies.
+
+   The fetch takes ~15 minutes and runs against a CDN that intermittently returns 503
+   or 429 under load, so transient failures are retried with exponential backoff, the
+   HDF5 handle is rebuilt if a connection drops, and rows are checkpointed after every
+   chunk. An interrupted fetch resumes where it stopped rather than starting over.
 2. **Checkpoint slimming.** The published `last.pth` is 2.86 GB because it carries
    DeepSpeed optimiser state. We strip it once and delete the original.
 
@@ -311,6 +316,21 @@ bad they are removed and the stage restarts cleanly instead of crashing.
 Worst case is one checkpoint interval: an epoch for training, five batches for
 `predict`. Set `time_budget_min` below your typical session length so runs stop at a
 clean boundary rather than being killed mid-write.
+
+**Every slow stage reports progress and checkpoints its work.**
+
+| stage | progress | resume granularity |
+|---|---|---|
+| `assets` (remote HDF5 fetch) | rows fetched | 256-row chunk |
+| `precompute` (CLIP embeddings) | images embedded | ~10 batches |
+| `train` | batch within epoch, run within sweep | one epoch |
+| `predict` | batch within arm, run within sweep | 5 batches |
+| `recon` (SDXL decode) | images decoded | ~3 batches |
+| `evaluate` | images per metric | whole arm (fast) |
+| `compare` | metrics processed | whole stage (fast) |
+
+Nothing needs deleting after a crash: re-run the same command and each stage picks up
+from its last checkpoint.
 
 **Progress reporting.** Three levels, so you always know where you are:
 

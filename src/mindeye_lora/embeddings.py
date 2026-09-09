@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .utils import human_bytes, log
+from .utils import human_bytes, log, progress, read_json, write_json
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
@@ -106,18 +106,42 @@ def precompute_embeddings(
     log.info("embedding %d images -> [%d, %d, %d] fp16 (%s)", n, n, seq, dim,
              human_bytes(n * seq * dim * 2))
 
+    # Resumable: the memmap on disk *is* the checkpoint, and a sidecar records how many
+    # rows are valid. Embedding 1,500+ images takes minutes, and losing it to a
+    # disconnect at 90% is avoidable.
     tmp = out_path.with_suffix(".tmp.npy")
-    out = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float16, shape=(n, seq, dim))
-    for start in range(0, n, batch_size):
+    progress_file = out_path.with_suffix(".progress.json")
+    start_row = 0
+    if tmp.exists() and not force:
+        state = read_json(progress_file, default={}) or {}
+        if state.get("shape") == [n, seq, dim]:
+            start_row = int(state.get("done", 0))
+            if start_row:
+                log.info("resuming embeddings from row %d/%d", start_row, n)
+    mode = "r+" if (tmp.exists() and start_row) else "w+"
+    out = (np.lib.format.open_memmap(tmp, mode="r+")
+           if mode == "r+"
+           else np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float16,
+                                          shape=(n, seq, dim)))
+
+    bar = progress(total=n, desc="CLIP embeddings", unit="img")
+    if start_row:
+        bar.update(start_row)
+    for start in range(start_row, n, batch_size):
         chunk = np.asarray(images[start : start + batch_size], dtype=np.float32)
         emb = embedder(torch.from_numpy(chunk))
-        out[start : start + batch_size] = emb.float().cpu().numpy().astype(np.float16)
+        stop = min(start + batch_size, n)
+        out[start:stop] = emb.float().cpu().numpy().astype(np.float16)
+        bar.update(stop - start)
         if (start // batch_size) % 10 == 0:
-            log.info("  %d/%d", min(start + batch_size, n), n)
+            out.flush()
+            write_json(progress_file, {"done": stop, "shape": [n, seq, dim]})
+    bar.close()
     out.flush()
     del out, embedder
     torch.cuda.empty_cache()
     tmp.replace(out_path)
+    progress_file.unlink(missing_ok=True)
     log.info("wrote %s (%s)", out_path.name, human_bytes(out_path.stat().st_size))
     return out_path
 

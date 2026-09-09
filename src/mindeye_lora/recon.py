@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from .assets import UNCLIP_CKPT, hf_download
-from .utils import human_bytes, log
+from .utils import human_bytes, log, progress, robust_load, robust_save
 
 GENERATIVE_MODELS_URL = "https://github.com/Stability-AI/generative-models.git"
 
@@ -137,16 +137,44 @@ def unclip_reconstruct(
     device: str = "cuda",
     batch_size: int = 4,
     upstream_utils=None,
+    checkpoint_path=None,
 ) -> torch.Tensor:
-    """Decode [N, 256, 1664] CLIP token embeddings into [N, 3, H, W] images in [0, 1]."""
+    """Decode [N, 256, 1664] CLIP token embeddings into [N, 3, H, W] images in [0, 1].
+
+    Diffusion decoding runs at 3-5 s/image, so a 200-image arm is a 15-minute stage.
+    Results are checkpointed every few batches and resumed, because re-decoding from
+    scratch after a disconnect is the most expensive restart in the pipeline.
+    """
     if upstream_utils is not None and hasattr(upstream_utils, "unclip_recon"):
-        outs = []
-        for start in range(0, len(clip_embeddings), batch_size):
+        outs, start_at = [], 0
+        if checkpoint_path is not None:
+            def _validate(part):
+                if "images" not in part or "done" not in part:
+                    raise ValueError("missing keys")
+                if int(part["done"]) != int(part["images"].shape[0]):
+                    raise ValueError("count disagrees with tensor length")
+
+            part = robust_load(checkpoint_path, validate=_validate)
+            if part is not None:
+                outs = [part["images"]]
+                start_at = int(part["done"])
+                log.info("resuming decode from image %d/%d", start_at, len(clip_embeddings))
+
+        bar = progress(total=len(clip_embeddings), desc="decode", unit="img")
+        if start_at:
+            bar.update(start_at)
+        for start in range(start_at, len(clip_embeddings), batch_size):
             chunk = clip_embeddings[start : start + batch_size].to(device)
             samples = upstream_utils.unclip_recon(chunk, engine, vector_suffix, num_samples=1)
             outs.append(samples.float().cpu())
-            log.info("  decoded %d/%d", min(start + batch_size, len(clip_embeddings)),
-                     len(clip_embeddings))
+            done = min(start + batch_size, len(clip_embeddings))
+            bar.update(done - start)
+            if checkpoint_path is not None and (start // batch_size) % 3 == 0:
+                try:
+                    robust_save({"images": torch.cat(outs), "done": done}, checkpoint_path)
+                except IOError as exc:
+                    log.warning("decode checkpoint failed (%s); continuing", exc)
+        bar.close()
         return torch.cat(outs).clamp(0, 1)
 
     raise RuntimeError(
@@ -193,12 +221,15 @@ def reconstruct_for_run(
 
     engine = build_diffusion_engine(ckpt, config_path, device=device, num_steps=num_steps)
     suffix = _vector_suffix(engine, device)
-    images = unclip_reconstruct(engine, emb, suffix, device=device, batch_size=batch_size,
-                                upstream_utils=up.utils)
-
     out_path = Path(out_path)
+    partial = out_path.with_name(out_path.stem + ".partial.pt")
+    images = unclip_reconstruct(engine, emb, suffix, device=device, batch_size=batch_size,
+                                upstream_utils=up.utils, checkpoint_path=partial)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"recons": images, "rows": preds["rows"][:n_images]}, out_path)
+    robust_save({"recons": images, "rows": preds["rows"][:n_images]}, out_path)
+    partial.unlink(missing_ok=True)
+    Path(str(partial) + ".bak").unlink(missing_ok=True)
     log.info("saved %d reconstructions -> %s", len(images), out_path.name)
 
     del engine

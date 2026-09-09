@@ -17,14 +17,16 @@ Everything is written through a manifest so re-running after a Colab reset is a 
 from __future__ import annotations
 
 import io
+import os
 import tarfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import numpy as np
 
-from .utils import human_bytes, log, read_json, write_json
+from .utils import human_bytes, log, progress, read_json, write_json
 
 REPO_ID = "pscotti/mindeyev2"
 REPO_TYPE = "dataset"
@@ -93,6 +95,44 @@ def resolve_test_shard(subj: int, available: Sequence[str] | None = None) -> str
 # --------------------------------------------------------------------------------------
 # remote HDF5 access
 # --------------------------------------------------------------------------------------
+TRANSIENT_HTTP = (500, 502, 503, 504, 429, 408)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Is this worth retrying, or is it a real failure?
+
+    The hub is fronted by a CDN that intermittently returns 503/429 under load. A
+    fifteen-minute range-request session will hit one sooner or later, and treating it
+    as fatal throws away all the bytes fetched so far.
+    """
+    status = getattr(exc, "status", None) or getattr(exc, "code", None)
+    if status in TRANSIENT_HTTP:
+        return True
+    text = f"{type(exc).__name__}: {exc}"
+    return any(
+        marker in text
+        for marker in ("503", "502", "504", "429", "Service Unavailable", "Timeout",
+                       "TimeoutError", "Connection", "ServerDisconnected",
+                       "IncompleteRead", "reset by peer")
+    )
+
+
+def retry(fn, attempts: int = 6, base_delay: float = 2.0, what: str = "request"):
+    """Call `fn`, retrying transient network failures with exponential backoff."""
+    import random
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == attempts or not _is_transient(exc):
+                raise
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+            log.warning("%s failed (%s); retry %d/%d in %.1fs",
+                        what, str(exc)[:80], attempt, attempts - 1, delay)
+            time.sleep(delay)
+
+
 @dataclass
 class RemoteH5:
     """Read rows of a hub-hosted HDF5 without downloading the whole thing."""
@@ -100,7 +140,7 @@ class RemoteH5:
     filename: str
     block_size: int = 8 * 1024 * 1024
 
-    def __enter__(self):
+    def open(self):
         import fsspec
         import h5py
 
@@ -109,11 +149,26 @@ class RemoteH5:
         self._h5 = h5py.File(self._fs_file, "r")
         return self
 
+    def close(self) -> None:
+        for attr in ("_h5", "_fs_file"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def reopen(self) -> None:
+        """A dropped connection poisons the h5py handle; rebuild it before retrying."""
+        self.close()
+        self.open()
+
+    def __enter__(self):
+        return retry(self.open, what=f"open {self.filename}")
+
     def __exit__(self, *exc):
-        try:
-            self._h5.close()
-        finally:
-            self._fs_file.close()
+        self.close()
 
     @property
     def key(self) -> str:
@@ -124,17 +179,63 @@ class RemoteH5:
                 return k
         raise KeyError(f"No dataset inside {self.filename}")
 
-    def take(self, indices: Sequence[int], batch: int = 256) -> np.ndarray:
-        """Gather `indices` rows (sorted internally, returned in the given order)."""
+    def read_chunk(self, chunk: np.ndarray) -> np.ndarray:
+        def _read():
+            return self._h5[self.key][chunk]
+
+        try:
+            return retry(_read, what=f"read {self.filename}")
+        except Exception:
+            # last resort: rebuild the connection entirely, then try once more
+            log.warning("reopening %s after repeated failures", self.filename)
+            retry(self.reopen, what=f"reopen {self.filename}")
+            return retry(_read, what=f"read {self.filename} (after reopen)")
+
+    def take(self, indices: Sequence[int], batch: int = 256,
+             cache_path: Path | None = None) -> np.ndarray:
+        """Gather `indices` rows (sorted internally, returned in the given order).
+
+        Partial results are written to `cache_path` after every chunk, so an
+        interrupted fetch resumes rather than starting over. Fetching ~1,500 image rows
+        takes about fifteen minutes; losing that to one transient 503 is unacceptable.
+        """
         ds = self._h5[self.key]
-        order = np.argsort(indices)
-        sorted_idx = np.asarray(indices, dtype=np.int64)[order]
-        out = np.empty((len(indices), *ds.shape[1:]), dtype=ds.dtype)
-        for start in range(0, len(sorted_idx), batch):
+        idx = np.asarray(indices, dtype=np.int64)
+        order = np.argsort(idx)
+        sorted_idx = idx[order]
+
+        out = np.empty((len(idx), *ds.shape[1:]), dtype=ds.dtype)
+        done = 0
+        if cache_path is not None and Path(cache_path).exists():
+            try:
+                with np.load(cache_path) as z:
+                    if int(z["n_total"]) == len(idx):
+                        cached, done = z["rows"], int(z["done"])
+                        out[: len(cached)] = cached
+                        log.info("resuming %s from row %d/%d", self.filename, done, len(idx))
+            except Exception as exc:
+                log.warning("ignoring unusable fetch cache (%s)", exc)
+                done = 0
+
+        bar = progress(total=len(sorted_idx), desc=f"fetch {self.filename[:28]}",
+                       unit="row")
+        if done:
+            bar.update(done)
+        for start in range(done, len(sorted_idx), batch):
             chunk = sorted_idx[start : start + batch]
-            out[order[start : start + batch]] = ds[chunk]
-            log.info("  fetched %d/%d rows of %s", min(start + batch, len(sorted_idx)),
-                     len(sorted_idx), self.filename)
+            out[order[start : start + batch]] = self.read_chunk(chunk)
+            fetched = min(start + batch, len(sorted_idx))
+            bar.update(fetched - max(start, done))
+            if cache_path is not None:
+                # np.savez appends ".npz" to a path argument, so write through an open
+                # handle to keep the atomic temp-then-rename intact.
+                tmp = Path(str(cache_path) + ".tmp")
+                with open(tmp, "wb") as fh:
+                    np.savez(fh, rows=out[:fetched], done=fetched, n_total=len(idx))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                tmp.replace(cache_path)
+        bar.close()
         return out
 
 
@@ -150,12 +251,13 @@ def local_h5_take(path: Path, indices: Sequence[int]) -> np.ndarray:
     return out
 
 
-def gather_rows(filename: str, indices: Sequence[int], local_copy: Path | None) -> np.ndarray:
+def gather_rows(filename: str, indices: Sequence[int], local_copy: Path | None,
+                cache_path: Path | None = None) -> np.ndarray:
     """Prefer a local full copy if the user already has one, else stream over HTTPS."""
     if local_copy is not None and Path(local_copy).exists():
         return local_h5_take(Path(local_copy), indices)
     with RemoteH5(filename) as rh:
-        return rh.take(indices)
+        return rh.take(indices, cache_path=cache_path)
 
 
 # --------------------------------------------------------------------------------------
@@ -339,7 +441,8 @@ def prepare_assets(
     uniq_trials = np.unique(trials)
     betas_name = BETAS_TPL.format(subj=subj)
     local_betas = hf_download(betas_name, assets) if full_local_hdf5 else None
-    voxels = gather_rows(betas_name, uniq_trials, local_betas)
+    voxels = gather_rows(betas_name, uniq_trials, local_betas,
+                         cache_path=data / f"_fetch_voxels_subj{subj:02d}_{num_sessions}sess.npz")
     np.save(paths.voxels, voxels.astype(np.float32))
     np.save(paths.voxel_index, uniq_trials)
     log.info("voxels: %s -> %s", voxels.shape, human_bytes(paths.voxels.stat().st_size))
@@ -350,7 +453,8 @@ def prepare_assets(
     ).astype(np.int64)
     uniq_coco = np.unique(coco)
     local_coco = hf_download(COCO_IMAGES, assets) if full_local_hdf5 else None
-    images = gather_rows(COCO_IMAGES, uniq_coco, local_coco)
+    images = gather_rows(COCO_IMAGES, uniq_coco, local_coco,
+                         cache_path=data / f"_fetch_images_subj{subj:02d}_{num_sessions}sess.npz")
     np.save(paths.images, images)  # float16 [N, 3, 224, 224] in [0, 1]
     np.save(paths.image_index, uniq_coco)
     log.info("images: %s -> %s", images.shape, human_bytes(paths.images.stat().st_size))
@@ -363,6 +467,9 @@ def prepare_assets(
     if paths.pretrain_ckpt.exists() and raw.exists() and raw != paths.pretrain_ckpt:
         raw.unlink()  # reclaim ~2 GB; the slim file is all we ever need
         log.info("removed raw checkpoint after slimming")
+
+    for stale in data.glob(f"_fetch_*_subj{subj:02d}_{num_sessions}sess.npz"):
+        stale.unlink(missing_ok=True)   # only needed while a fetch is in flight
 
     write_json(
         meta_path,

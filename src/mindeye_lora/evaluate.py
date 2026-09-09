@@ -334,11 +334,15 @@ class ImageMetricSuite:
             "ssim": self._ssim(recons, targets),
         }
 
-        def feats(fn) -> tuple[torch.Tensor, torch.Tensor]:
+        def feats(fn, label: str = "") -> tuple[torch.Tensor, torch.Tensor]:
             rs, gs = [], []
+            bar = progress(total=len(recons), desc=f"metric {label}", unit="img",
+                           leave=False)
             for s in range(0, len(recons), batch):
                 rs.append(fn(recons[s : s + batch].to(self.device)).cpu())
                 gs.append(fn(targets[s : s + batch].to(self.device)).cpu())
+                bar.update(min(batch, len(recons) - s))
+            bar.close()
             return torch.cat(rs), torch.cat(gs)
 
         for key, fn in [
@@ -348,14 +352,14 @@ class ImageMetricSuite:
             ("clip", self._clip_features),
         ]:
             try:
-                r, g = feats(fn)
+                r, g = feats(fn, key)
                 out[key] = self._pairwise_two_way(r, g)
             except Exception as exc:  # a missing model shouldn't kill the whole report
                 log.warning("metric %s failed: %s", key, exc)
 
         for key, name in [("effnet", "efficientnet"), ("swav", "swav")]:
             try:
-                r, g = feats(lambda x, n=name: self._generic_features(x, n))
+                r, g = feats(lambda x, n=name: self._generic_features(x, n), key)
                 rn = F.normalize(r, dim=1)
                 gn = F.normalize(g, dim=1)
                 out[key] = (1 - (rn * gn).sum(1)).numpy()   # correlation distance

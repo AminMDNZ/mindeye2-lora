@@ -347,6 +347,10 @@ before retrying: a CUDA OOM in a notebook is sticky, because the traceback holds
 local in every frame including the model that just failed, so a retry often OOMs before
 training even starts. Nothing on Drive is lost.
 
+**Every slow stage shows progress and checkpoints.** Asset fetching resumes per
+256-row chunk, CLIP embedding per ~10 batches, training per epoch, predict per 5
+batches, and SDXL decoding per ~3 batches. Re-run the same command and it continues.
+
 **Nothing needs deleting after a crash.** Checkpoints are written durably and kept in
 two generations; a corrupt one falls back to its backup, and if both are bad they are
 removed automatically and that stage restarts. Re-run the same command.

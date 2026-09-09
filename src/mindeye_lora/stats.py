@@ -23,6 +23,8 @@ from typing import Sequence
 import numpy as np
 from scipy import stats as sps
 
+from .utils import log, progress
+
 
 # --------------------------------------------------------------------------------------
 # bootstrap
@@ -64,7 +66,16 @@ def paired_bootstrap(
     idx = rng.integers(0, n, size=(n_boot, n))
     boot = statistic(d[idx], axis=1)
     theta = float(statistic(d))
-    jack = np.array([statistic(np.delete(d, i)) for i in range(n)]) if n <= 2000 else None
+    # Jackknife for the BCa acceleration term. Vectorised for the mean (the common
+    # case): a Python loop over np.delete is O(n^2) copies and dominates runtime at
+    # n=1000 across dozens of arm/metric pairs.
+    jack = None
+    if n <= 5000:
+        if statistic is np.mean:
+            total = d.sum()
+            jack = (total - d) / (n - 1)
+        else:
+            jack = np.array([statistic(np.delete(d, i)) for i in range(n)])
     if jack is not None:
         lo, hi = _bca_interval(boot, theta, jack, alpha)
         method = "BCa"
@@ -89,13 +100,24 @@ def cohens_dz(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def paired_tests(a: np.ndarray, b: np.ndarray) -> dict:
-    a, b = np.asarray(a, float), np.asarray(b, float)
+    # np.asarray(..., float) alone can pass through an exotic array type; ascontiguousarray
+    # forces a plain float64 buffer so SciPy takes its NumPy path rather than dispatching
+    # on whichever array namespace happens to be importable.
+    a = np.ascontiguousarray(np.asarray(a, dtype=np.float64))
+    b = np.ascontiguousarray(np.asarray(b, dtype=np.float64))
     d = a - b
     t_stat, t_p = sps.ttest_rel(a, b)
-    try:
-        w_stat, w_p = sps.wilcoxon(a, b, zero_method="wilcox", alternative="two-sided")
-    except ValueError:  # all differences zero
+    if not np.any(d):
+        # identical arms: Wilcoxon is undefined, and the honest answer is "no evidence"
         w_stat, w_p = 0.0, 1.0
+    else:
+        try:
+            w_stat, w_p = sps.wilcoxon(a, b, alternative="two-sided")
+        except Exception as exc:
+            # A failure here must not take down the whole comparison stage; the paired
+            # t-test and the bootstrap interval still carry the result.
+            log.warning("Wilcoxon failed (%s); reporting p=nan for this pair", exc)
+            w_stat, w_p = float("nan"), float("nan")
     return {
         "mean_a": float(a.mean()),
         "mean_b": float(b.mean()),
@@ -138,6 +160,7 @@ def tost_equivalence(a: np.ndarray, b: np.ndarray, margin: float, alpha: float =
 def holm_bonferroni(pvalues: Sequence[float], alpha: float = 0.05) -> dict:
     """Step-down Holm correction: strong FWER control without Bonferroni's conservatism."""
     p = np.asarray(pvalues, float)
+    p = np.where(np.isfinite(p), p, 1.0)   # a failed test is not a significant one
     m = len(p)
     order = np.argsort(p)
     adjusted = np.empty(m)
@@ -241,7 +264,9 @@ def compare_against_reference(
     metrics = list(metrics or ref.keys())
     results: list[Comparison] = []
 
+    bar = progress(total=len(metrics), desc="paired statistics", unit="metric")
     for metric in metrics:
+        bar.update(1)
         if metric not in ref:
             continue
         b = np.asarray(ref[metric], float)
@@ -278,6 +303,7 @@ def compare_against_reference(
                 c.p_holm = float(padj)
                 c.significant = bool(rej)
         results.extend(block)
+    bar.close()
     return results
 
 
@@ -293,7 +319,9 @@ def retention_table(
     higher_is_better = higher_is_better or {}
     rows = []
     metrics = list(metrics or per_arm[full_arm].keys())
+    bar = progress(total=len(metrics), desc="retention ratios", unit="metric")
     for metric in metrics:
+        bar.update(1)
         if metric not in per_arm.get(full_arm, {}) or metric not in per_arm.get(frozen_arm, {}):
             continue
         for arm, md in per_arm.items():
@@ -305,6 +333,7 @@ def retention_table(
                 higher_is_better=higher_is_better.get(metric, True),
             )
             rows.append({"metric": metric, "arm": arm, **r})
+    bar.close()
     return rows
 
 
