@@ -64,6 +64,9 @@ print("repo ready:", os.getcwd())
 
 code("""
 !bash setup/colab_setup.sh
+# bitsandbytes needs its real dependency chain to find CUDA, so it is installed
+# separately rather than through the --no-deps path the setup script uses.
+!pip install -q bitsandbytes
 """),
 
 md("""
@@ -196,6 +199,15 @@ State is saved to Drive every 10 minutes and at each epoch boundary, and
 `time_budget_min` stops cleanly before a session is likely to be reclaimed. Re-run this
 cell next session to continue.
 
+Progress reports at three levels — stage, run within the sweep, and batch within the
+run — so a long stage is never indistinguishable from a hang:
+
+```
+╔═ training runs 5/18 · subj01_1sess_lora_r16_seed0 ═══
+║  ~74 min left (5.3 min per training run so far, 14 remaining)
+lora_r16 seed0 · epoch 3/150: 41%|████  | 47/114 [01:52<02:39, loss=10.264]
+```
+
 A memory preflight runs before each arm and refuses runs it predicts will not fit,
 naming a `batch_size` / `grad_accum` pair that should. The shipped configs use
 `batch_size: 6, grad_accum: 4` — an effective batch of 24, matching the paper, split
@@ -215,10 +227,19 @@ md("""
 ## 9. Predict
 
 Runs each trained model over the test set and caches its predicted CLIP embeddings,
-sampled through the diffusion prior.
+sampled through the diffusion prior. Roughly 12 minutes per arm.
+
+Partial results are written every 10 batches to `predictions.partial.pt` and resumed
+automatically, so a disconnect costs a minute or two rather than the whole arm. Running
+one arm per cell narrows the blast radius further.
 """),
 code("""
 main(["predict", "--config", CONFIG])
+
+# or one arm at a time, if the connection is unreliable:
+# main(["predict", "--config", CONFIG, "--arm", "frozen"])
+# main(["predict", "--config", CONFIG, "--arm", "lora_r16"])
+# main(["predict", "--config", CONFIG, "--arm", "full"])
 """),
 
 md("""
@@ -305,6 +326,13 @@ fit; apply it in the config, keeping the product at 24. Then **restart the runti
 before retrying: a CUDA OOM in a notebook is sticky, because the traceback holds every
 local in every frame including the model that just failed, so a retry often OOMs before
 training even starts. Nothing on Drive is lost.
+
+**Is it stuck?** Check the GPU from a second cell:
+`!nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader`.
+A few MiB of memory means no process holds the GPU — the run died rather than stalled,
+so reconnect and re-run. Several GB held at a sustained 0% means it is blocked on data
+loading, not computing. Data caches are mirrored to local disk automatically because
+Drive is slow at the random-access reads the loaders do; `--no-local-cache` disables it.
 
 **Anything about a missing module.** `colab_setup.sh` resolves missing packages
 automatically. If it reports the *same* module twice, that is a moved import path rather

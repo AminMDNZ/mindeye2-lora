@@ -300,7 +300,28 @@ restart the runtime — nothing on Drive is lost.
 
 **Session died mid-training.**
 Re-run the same command. Set `time_budget_min` a bit below your typical session length
-so it always stops at a clean epoch boundary.
+so it always stops at a clean epoch boundary. `predict` checkpoints every 10 batches and
+resumes from `predictions.partial.pt`, so an interrupted arm costs a minute or two rather
+than its full ~12.
+
+**Progress reporting.** Three levels, so you always know where you are:
+
+```
+═══ stage 3/8: train ═══ (12.4 min elapsed)
+╔═ training runs 5/18 · subj01_1sess_lora_r16_seed0 ═══
+║  ~74 min left (5.3 min per training run so far, 14 remaining)
+lora_r16 seed0 · epoch 3/150: 41%|████  | 47/114 [01:52<02:39, loss=10.264, lr=8.3e-04]
+```
+
+Stage, then run within the sweep, then batch within the run. Runs skipped as already
+finished are counted but excluded from the rate, so the ETA reflects real work.
+
+**Is it working, or hung?**
+Training and `predict` both show a progress bar with a live ETA. If you need to check
+from another cell, `!nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv` —
+a few MiB of memory means no process holds the GPU at all, i.e. the run died rather than
+stalled. Sustained 0% utilisation *with* several GB held means it is blocked on data
+loading, not computing.
 
 **`Upstream utils.unclip_recon is unavailable.`**
 The decoder path needs upstream's helper. Use `--decoder none` — all statistics still

@@ -168,6 +168,105 @@ def timed(label: str):
 
 
 # --------------------------------------------------------------------------------------
+# Progress reporting
+# --------------------------------------------------------------------------------------
+def progress(iterable=None, total: int | None = None, desc: str = "", leave: bool = True,
+             unit: str = "it", disable: bool = False):
+    """tqdm if available, otherwise a no-op wrapper.
+
+    Uses `tqdm.auto` so the bar renders as a widget in notebooks and as text in a
+    terminal. Long stages without a bar are indistinguishable from a hang, which costs
+    more in wasted waiting than the bar costs in output.
+    """
+    if disable:
+        return iterable if iterable is not None else _NullBar()
+    try:
+        from tqdm.auto import tqdm
+
+        return tqdm(iterable, total=total, desc=desc, leave=leave, unit=unit,
+                    dynamic_ncols=True, smoothing=0.1)
+    except ImportError:  # pragma: no cover
+        return iterable if iterable is not None else _NullBar()
+
+
+class _NullBar:
+    """Stand-in with tqdm's interface, for when tqdm is unavailable."""
+
+    def update(self, n: int = 1) -> None:
+        pass
+
+    def set_postfix(self, *a, **k) -> None:
+        pass
+
+    def set_description(self, *a, **k) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class RunTracker:
+    """Overall progress across a grid of (arm, seed) runs.
+
+    Individual progress bars answer "is this step moving?"; this answers "how much of
+    the whole experiment is left?", which is the question that matters when a full sweep
+    is 18 runs spread over several Colab sessions.
+
+    Counts runs skipped as already-finished separately, so resuming a partly-complete
+    sweep reports an honest ETA based only on work actually done in this session.
+    """
+
+    def __init__(self, total: int, label: str = "runs"):
+        self.total = total
+        self.label = label
+        self.done = 0
+        self.skipped = 0
+        self.t0 = time.time()
+
+    def start(self, name: str) -> None:
+        remaining = self.total - self.done - self.skipped
+        log.info(
+            "╔═ %s %d/%d · %s ═══", self.label, self.done + self.skipped + 1,
+            self.total, name,
+        )
+        if self.done:
+            per = (time.time() - self.t0) / self.done
+            log.info("║  ~%.0f min left (%.1f min per %s so far, %d remaining)",
+                     per * remaining / 60, per / 60, self.label.rstrip("s"), remaining)
+
+    def finish(self, name: str, skipped: bool = False) -> None:
+        if skipped:
+            self.skipped += 1
+        else:
+            self.done += 1
+        pct = 100 * (self.done + self.skipped) / max(1, self.total)
+        log.info("╚═ %s %s · %d/%d complete (%.0f%%)%s", self.label.rstrip("s"), name,
+                 self.done + self.skipped, self.total, pct,
+                 "  [skipped, already done]" if skipped else "")
+
+    def summary(self) -> str:
+        mins = (time.time() - self.t0) / 60
+        return (f"{self.done + self.skipped}/{self.total} {self.label} complete "
+                f"({self.done} run here, {self.skipped} already done) in {mins:.1f} min")
+
+
+def eta_string(done: int, total: int, elapsed_s: float) -> str:
+    """'12/63 · 4.1 min elapsed · ~8.7 min left' — the line people actually want."""
+    if done <= 0:
+        return f"0/{total}"
+    rate = elapsed_s / done
+    remaining = rate * (total - done)
+    return (f"{done}/{total} · {elapsed_s/60:.1f} min elapsed · "
+            f"~{remaining/60:.1f} min left")
+
+
+# --------------------------------------------------------------------------------------
 # Model introspection
 # --------------------------------------------------------------------------------------
 def count_parameters(module) -> dict[str, int]:

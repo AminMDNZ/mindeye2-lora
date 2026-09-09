@@ -37,9 +37,11 @@ from .upstream import load_upstream
 from .utils import (
     CSVLogger,
     TimeBudget,
+    eta_string,
     human_bytes,
     log,
     parameter_report,
+    progress,
     read_json,
     seed_everything,
     write_json,
@@ -270,6 +272,7 @@ def train_arm(
         "upstream_sha": up.sha,
     })
 
+    t_start_run = time.time()
     budget = TimeBudget(cfg.time_budget_min)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -295,7 +298,14 @@ def train_arm(
         running = {"loss": 0.0, "prior": 0.0, "clip": 0.0, "n": 0}
         opt.zero_grad(set_to_none=True)
 
-        for it, (voxel, clip_target, _img, _row) in enumerate(train_loader):
+        bar = progress(
+            train_loader,
+            total=steps_per_epoch,
+            desc=f"{arm.name} seed{seed} · epoch {epoch + 1}/{cfg.epochs}",
+            unit="batch",
+            leave=False,
+        )
+        for it, (voxel, clip_target, _img, _row) in enumerate(bar):
             voxel = voxel.to(device, non_blocking=True).unsqueeze(1)   # [B, 1, V]
             clip_target = clip_target.to(device, non_blocking=True)
 
@@ -334,20 +344,36 @@ def train_arm(
                     torch.nn.utils.clip_grad_norm_(
                         [p for p in model.parameters() if p.requires_grad], cfg.max_grad_norm
                     )
+                # GradScaler skips the optimizer step when it finds inf/nan while
+                # calibrating the fp16 loss scale, and signals this by *lowering* the
+                # scale. Stepping the LR schedule anyway would silently consume schedule
+                # positions on steps that never happened.
+                scale_before = scaler.get_scale()
                 scaler.step(opt)
                 scaler.update()
+                stepped = scaler.get_scale() >= scale_before
                 opt.zero_grad(set_to_none=True)
-                if sched.last_epoch < total_steps - 1:
+                if stepped and sched.last_epoch < total_steps - 1:
                     sched.step()
-                global_step += 1
+                    global_step += 1
 
             bs = voxel.shape[0]
             running["loss"] += loss.item() * cfg.grad_accum * bs
-            running["prior"] += float(loss_prior) * bs
-            running["clip"] += float(loss_clip) * bs
+            running["prior"] += float(loss_prior.detach()) * bs
+            running["clip"] += float(loss_clip.detach()) * bs
             running["n"] += bs
+            if hasattr(bar, "set_postfix") and it % 5 == 0:
+                bar.set_postfix(loss=f"{running['loss'] / max(1, running['n']):.3f}",
+                                lr=f"{sched.get_last_lr()[0]:.2e}")
 
+        if hasattr(bar, "close"):
+            bar.close()
         train_seconds += time.time() - t_epoch
+        epochs_done_now = epoch - start_epoch + 1
+        log.info("epoch %d/%d · loss %.4f · %s", epoch + 1, cfg.epochs,
+                 running["loss"] / max(1, running["n"]),
+                 eta_string(epochs_done_now, cfg.epochs - start_epoch,
+                            time.time() - t_start_run))
         n = max(1, running["n"])
         row = {
             "epoch": epoch, "step": global_step, "lr": sched.get_last_lr()[0],
@@ -358,9 +384,8 @@ def train_arm(
         if (epoch + 1) % cfg.eval_every == 0 or epoch == cfg.epochs - 1:
             row.update(evaluate_embedding_space(model, test_loader, device, cfg.precision,
                                                 max_batches=10))
-            log.info("epoch %3d | loss %.4f | cos %.4f | fwd@1 %.3f",
-                     epoch, row["loss"], row.get("cosine", float("nan")),
-                     row.get("fwd_top1", float("nan")))
+            log.info("   eval · cos %.4f · fwd@1 %.3f",
+                     row.get("cosine", float("nan")), row.get("fwd_top1", float("nan")))
         csv.log(**row)
 
         should_save = (time.time() - last_save) / 60 >= cfg.save_every_min or epoch == cfg.epochs - 1
@@ -415,8 +440,9 @@ def train_arm(
     if completed:
         log.info("✔ %s done: cos=%.4f fwd@1=%.3f peak=%s", run_name,
                  final_metrics["cosine"], final_metrics["fwd_top1"], human_bytes(peak))
-    del model, opt
-    torch.cuda.empty_cache()
+    # Free before the next arm builds its own model: `del` alone leaves the allocator
+    # holding the blocks, and the following arm then starts with the card half full.
+    release_cuda(model, opt, scaler, test_loader, train_loader)
     return result
 
 

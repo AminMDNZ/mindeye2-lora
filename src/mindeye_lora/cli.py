@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -20,14 +21,19 @@ import numpy as np
 
 from .config import ExperimentConfig, load_config, save_config
 from .env import get_workspace, setup_environment
-from .utils import human_bytes, log, read_json, write_json
+from .utils import RunTracker, human_bytes, log, read_json, write_json
 
 
 # --------------------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------------------
-def _ws(args):
-    return setup_environment(args.root, use_drive=not args.no_drive)
+def _ws(args, mirror_data: bool = False):
+    ws = setup_environment(args.root, use_drive=not args.no_drive)
+    if mirror_data and not getattr(args, "no_local_cache", False):
+        from .env import mirror_data_locally
+
+        ws = mirror_data_locally(ws)
+    return ws
 
 
 def _cfg(args) -> ExperimentConfig:
@@ -134,7 +140,7 @@ def cmd_verify(args):
 
 
 def cmd_train(args):
-    ws, cfg = _ws(args), _cfg(args)
+    ws, cfg = _ws(args, mirror_data=True), _cfg(args)
     import torch
 
     from .train import train_arm
@@ -143,12 +149,18 @@ def cmd_train(args):
     arms = _selected_arms(cfg, args.arm)
     seeds = [int(s) for s in (args.seed or cfg.seeds)]
     results = []
+    tracker = RunTracker(len(seeds) * len(arms), label="training runs")
     for seed in seeds:
         for arm in arms:
+            run_name = cfg.run_name(arm.name, seed)
+            prior = read_json(ws.run_dir(run_name) / "result.json")
+            already = bool(prior and prior.get("completed"))
+            tracker.start(run_name)
             try:
                 results.append(asdict(train_arm(
                     cfg, arm, seed, ws, device=device, resume=not args.restart,
                     ignore_memory_check=args.ignore_memory_check)))
+                tracker.finish(run_name, skipped=already)
             except torch.cuda.OutOfMemoryError:
                 # Release before re-raising: otherwise the traceback pins the failed
                 # model and every later arm OOMs too, for no reason.
@@ -161,6 +173,7 @@ def cmd_train(args):
                     cfg.run_name(arm.name, seed),
                 )
                 raise
+    log.info("── %s ──", tracker.summary())
     write_json(ws["results"] / "training_summary.json", results)
     for r in results:
         print(f"{r['run_name']:44s} trainable={r['trainable_params']:>12,} "
@@ -192,13 +205,17 @@ def cmd_predict(args):
         num_workers=cfg.num_workers, eval_batch_size=args.batch_size or 16,
     )
 
-    for seed in [int(s) for s in (args.seed or cfg.seeds)]:
-        for arm in _selected_arms(cfg, args.arm):
+    pred_seeds = [int(s) for s in (args.seed or cfg.seeds)]
+    pred_arms = _selected_arms(cfg, args.arm)
+    tracker = RunTracker(len(pred_seeds) * len(pred_arms), label="predict runs")
+    for seed in pred_seeds:
+        for arm in pred_arms:
             run_dir = ws.run_dir(cfg.run_name(arm.name, seed))
             out = run_dir / "predictions.pt"
             if out.exists() and not args.force:
-                log.info("predictions exist for %s", run_dir.name)
+                tracker.finish(run_dir.name, skipped=True)
                 continue
+            tracker.start(run_dir.name)
             weights = run_dir / ("weights_full.pt" if arm.mode == "full" else "adapter.pt")
             if not weights.exists():
                 log.warning("no trained weights for %s — train it first.", run_dir.name)
@@ -209,12 +226,21 @@ def cmd_predict(args):
                 model.load_state_dict(payload, strict=False)
             else:
                 load_adapter_state_dict(model, payload)
-            preds = predict(model, test_loader, device=device, precision=cfg.precision,
-                            use_prior=cfg.use_prior, prior_timesteps=args.prior_timesteps)
+            partial = run_dir / "predictions.partial.pt"
+            preds = predict(
+                model, test_loader, device=device, precision=cfg.precision,
+                use_prior=cfg.use_prior, prior_timesteps=args.prior_timesteps,
+                desc=f"predict {arm.name} seed{seed}",
+                checkpoint_path=partial,
+            )
             torch.save(preds, out)
+            partial.unlink(missing_ok=True)
             log.info("saved predictions -> %s", out)
-            del model
-            torch.cuda.empty_cache()
+            tracker.finish(run_dir.name)
+            from .train import release_cuda
+
+            release_cuda(model)
+    log.info("── %s ──", tracker.summary())
 
 
 def cmd_recon(args):
@@ -263,7 +289,7 @@ def cmd_recon(args):
 
 
 def cmd_evaluate(args):
-    ws, cfg = _ws(args), _cfg(args)
+    ws, cfg = _ws(args, mirror_data=True), _cfg(args)
     import torch
 
     from .assets import AssetPaths, load_asset_meta
@@ -509,12 +535,14 @@ def cmd_run_all(args):
         ("report", cmd_report),
     ]
     skip = set(args.skip or [])
-    for name, fn in stages:
-        if name in skip:
-            log.info("skipping stage %s", name)
-            continue
-        log.info("═══ stage: %s ═══", name)
+    active = [(n, f) for n, f in stages if n not in skip]
+    t0 = time.time()
+    for i, (name, fn) in enumerate(active, start=1):
+        log.info("═══ stage %d/%d: %s ═══ (%.1f min elapsed)",
+                 i, len(active), name, (time.time() - t0) / 60)
         fn(args)
+    log.info("═══ all %d stages complete in %.1f min ═══",
+             len(active), (time.time() - t0) / 60)
 
 
 def cmd_status(args):
@@ -542,7 +570,7 @@ GLOBAL_DEFAULTS = {
     "root": None, "no_drive": False, "config": None, "subj": None, "num_sessions": None,
     "epochs": None, "batch_size": None, "lr": None, "time_budget_min": None,
     "recon_n_images": None, "num_workers": None, "precision": None, "pretrain": None,
-    "upstream_ref": None, "recon_decoder": None, "seeds": None,
+    "upstream_ref": None, "recon_decoder": None, "seeds": None, "no_local_cache": False,
 }
 
 
@@ -560,6 +588,10 @@ def _add_global_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--no-drive", dest="no_drive", action="store_true", default=S,
                         help="do not mount Google Drive")
     parser.add_argument("--config", default=S, help="YAML config path")
+    parser.add_argument("--no-local-cache", dest="no_local_cache", action="store_true",
+                        default=S,
+                        help="read caches straight from Drive instead of mirroring them "
+                             "to local disk (slower, but uses no local storage)")
     for name, kind in [("subj", int), ("num_sessions", int), ("epochs", int),
                        ("batch_size", int), ("lr", float), ("time_budget_min", float),
                        ("recon_n_images", int), ("num_workers", int)]:

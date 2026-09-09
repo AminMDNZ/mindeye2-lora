@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .utils import log
+from .utils import eta_string, log, progress
 
 from .metric_meta import (  # re-exported for convenience
     EMBEDDING_METRICS,
@@ -58,12 +58,43 @@ def predict(
     precision: str = "fp16",
     use_prior: bool = True,
     prior_timesteps: int = 20,
+    desc: str = "predict",
+    checkpoint_path=None,
+    checkpoint_every: int = 10,
 ) -> dict[str, torch.Tensor]:
-    """Run the encoder over the test set. Returns CPU float32 tensors."""
+    """Run the encoder over the test set. Returns CPU float32 tensors.
+
+    Sampling 1,000 images through the diffusion prior takes ~12 minutes per arm, which
+    is long enough that a Colab disconnect used to throw the whole arm away. Partial
+    results are now written every `checkpoint_every` batches and resumed automatically.
+    """
+    import time
+
     model.eval()
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[precision]
     backbones, clip_voxels, priors, targets, rows = [], [], [], [], []
-    for voxel, clip_target, _img, row in loader:
+
+    start_batch = 0
+    if checkpoint_path is not None and Path(checkpoint_path).exists():
+        part = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        backbones = [part["backbone"]]
+        clip_voxels = [part["clip_voxels"]]
+        targets = [part["target"]]
+        rows = [part["rows"]]
+        if "prior" in part:
+            priors = [part["prior"]]
+        start_batch = int(part["batches_done"])
+        log.info("resuming %s from batch %d", desc, start_batch)
+
+    total = len(loader)
+    t0 = time.time()
+    bar = progress(total=total, desc=desc, unit="batch")
+    if start_batch:
+        bar.update(start_batch)
+
+    for i, (voxel, clip_target, _img, row) in enumerate(loader):
+        if i < start_batch:          # already covered by the checkpoint
+            continue
         voxel = voxel.to(device, non_blocking=True).unsqueeze(1)
         with torch.autocast("cuda", dtype=dtype, enabled=precision != "fp32"):
             latent = model.ridge(voxel, 0)
@@ -79,6 +110,26 @@ def predict(
                 pr = _call_prior_sampler(model.diffusion_prior, backbone_out,
                                          timesteps=prior_timesteps)
             priors.append(pr.float().cpu())
+
+        bar.update(1)
+        done = i + 1
+        if hasattr(bar, "set_postfix"):
+            bar.set_postfix_str(eta_string(done - start_batch, total - start_batch,
+                                           time.time() - t0))
+
+        if checkpoint_path is not None and done % checkpoint_every == 0 and done < total:
+            partial = {
+                "backbone": torch.cat(backbones), "clip_voxels": torch.cat(clip_voxels),
+                "target": torch.cat(targets), "rows": torch.cat(rows),
+                "batches_done": done,
+            }
+            if priors:
+                partial["prior"] = torch.cat(priors)
+            tmp = Path(str(checkpoint_path) + ".tmp")
+            torch.save(partial, tmp)
+            tmp.replace(checkpoint_path)
+
+    bar.close()
     result = {
         "backbone": torch.cat(backbones),
         "clip_voxels": torch.cat(clip_voxels),

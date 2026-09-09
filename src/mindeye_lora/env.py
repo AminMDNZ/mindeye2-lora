@@ -169,6 +169,40 @@ def setup_environment(
     return ws
 
 
+def mirror_data_locally(ws: Workspace, local_root: str | Path = "/content/mindeye_cache") -> Workspace:
+    """Copy the memory-mapped caches to local disk and read them from there.
+
+    The voxel, image and CLIP-embedding caches are read with random access, one sample
+    at a time. On Drive that is a network round trip per sample and the GPU spends most
+    of its time idle; on Colab's local disk it is not. Results and checkpoints stay on
+    Drive, so nothing is lost when the runtime resets — only the mirror is rebuilt, and
+    that is a sequential copy, which Drive is fine at.
+
+    No-op off Colab, or if the files are already mirrored.
+    """
+    import shutil
+
+    if not in_colab():
+        return ws
+    local = Path(local_root) / "data"
+    local.mkdir(parents=True, exist_ok=True)
+    source = ws.paths["data"]
+    copied = 0
+    for f in sorted(source.glob("*.npy")):
+        dst = local / f.name
+        if dst.exists() and dst.stat().st_size == f.stat().st_size:
+            continue
+        log.info("mirroring %s (%s) to local disk", f.name, human_bytes(f.stat().st_size))
+        shutil.copy2(f, dst)
+        copied += 1
+    for f in sorted(source.glob("*.json")):
+        shutil.copy2(f, local / f.name)
+    ws.paths["data"] = local
+    if copied:
+        log.info("mirrored %d file(s) -> %s", copied, local)
+    return ws
+
+
 def get_workspace() -> Workspace:
     """Re-attach to an already-configured workspace without touching env vars."""
     root = Path(os.environ.get("MINDEYE_LORA_ROOT", default_root()))
