@@ -178,7 +178,12 @@ def load_sharded_state_dict(engine, shard_dir: Path) -> None:
                 if target is None:
                     missing += 1
                     continue
-                target.copy_(value.to(target.dtype))
+                if tuple(target.shape) != tuple(value.shape):
+                    log.warning("shape mismatch for %s: %s vs %s", key,
+                                tuple(target.shape), tuple(value.shape))
+                    missing += 1
+                    continue
+                target.copy_(value.to(device=target.device, dtype=target.dtype))
                 loaded += 1
         del shard
     log.info("decoder weights: %d loaded, %d unmatched", loaded, missing)
@@ -186,7 +191,7 @@ def load_sharded_state_dict(engine, shard_dir: Path) -> None:
 
 def build_diffusion_engine(
     ckpt_path: Path, config_path: Path, device: str = "cuda", num_steps: int = 38,
-    sharded: bool = True,
+    sharded: bool = True, dtype=None,
 ):
     import importlib
 
@@ -199,6 +204,7 @@ def build_diffusion_engine(
         DiffusionEngine = importlib.import_module(
             "generative_models.sgm.models.diffusion").DiffusionEngine
 
+    dtype = dtype if dtype is not None else torch.float16
     cfg = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     params = cfg["model"]["params"]
     params["sampler_config"]["params"]["num_steps"] = num_steps
@@ -214,9 +220,17 @@ def build_diffusion_engine(
         disable_first_stage_autocast=params["disable_first_stage_autocast"],
     )
     if sharded:
-        # Move the (randomly initialised) engine to the GPU first, then stream weights
-        # in shard by shard: at no point is the full state dict resident in RAM.
+        # Half precision *before* moving to the GPU. The engine is instantiated in fp32,
+        # and its parts are large: the FrozenOpenCLIPImageEmbedder is 1.9B parameters
+        # (7.6 GB fp32) and SDXL's UNet another 2.6B, so a fp32 engine needs ~14 GB
+        # before a single image is decoded and OOMs a 16 GB card during `.to(device)`.
+        # The shards are fp16 anyway, so nothing is lost by matching them.
+        if dtype == torch.float16:
+            engine = engine.half()
         engine = engine.to(device).eval().requires_grad_(False)
+        if torch.cuda.is_available():
+            log.info("decoder on GPU: %.1f GB allocated",
+                     torch.cuda.memory_allocated() / 1024**3)
         load_sharded_state_dict(engine, ckpt_path)
     else:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -341,6 +355,14 @@ def reconstruct_for_run(
         with contextlib.suppress(OSError):
             raw.unlink()
             log.info("removed the raw 18 GB checkpoint after sharding")
+
+    # The encoder is not needed from here on, and the decoder wants every spare byte.
+    from .train import release_cuda
+
+    release_cuda()
+    if torch.cuda.is_available():
+        log.info("before decoder build: %.1f GB free",
+                 torch.cuda.mem_get_info()[0] / 1024**3)
 
     engine = build_diffusion_engine(shard_dir, config_path, device=device,
                                     num_steps=num_steps, sharded=True)
