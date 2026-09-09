@@ -299,10 +299,18 @@ including the model that just failed, so a retry often OOMs before training star
 restart the runtime — nothing on Drive is lost.
 
 **Session died mid-training.**
-Re-run the same command. Set `time_budget_min` a bit below your typical session length
-so it always stops at a clean epoch boundary. `predict` checkpoints every 10 batches and
-resumes from `predictions.partial.pt`, so an interrupted arm costs a minute or two rather
-than its full ~12.
+Re-run the same command; nothing needs deleting by hand.
+
+Checkpoints are written to survive a killed VM. Google Drive's mount uploads
+asynchronously, so a file that finished writing locally can still be truncated in the
+cloud if the session is reclaimed a moment later. Every checkpoint is therefore
+fsynced, read back to prove it deserialises, and rotated so the previous good copy
+survives as `.bak`. On load, a corrupt primary falls back to the backup; if both are
+bad they are removed and the stage restarts cleanly instead of crashing.
+
+Worst case is one checkpoint interval: an epoch for training, five batches for
+`predict`. Set `time_budget_min` below your typical session length so runs stop at a
+clean boundary rather than being killed mid-write.
 
 **Progress reporting.** Three levels, so you always know where you are:
 

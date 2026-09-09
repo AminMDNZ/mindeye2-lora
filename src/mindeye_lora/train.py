@@ -38,6 +38,8 @@ from .utils import (
     CSVLogger,
     TimeBudget,
     eta_string,
+    robust_load,
+    robust_save,
     human_bytes,
     log,
     parameter_report,
@@ -244,8 +246,17 @@ def train_arm(
     log.info("loss implementations: %s", L["source"])
 
     start_epoch, global_step, train_seconds = 0, 0, 0.0
-    if resume and state_path.exists():
-        state = torch.load(state_path, map_location=device, weights_only=False)
+    if resume:
+        def _validate(state):
+            for key in ("model", "optimizer", "scheduler", "epoch", "global_step"):
+                if key not in state:
+                    raise ValueError(f"missing key {key!r}")
+
+        state = robust_load(state_path, validate=_validate, map_location=device)
+    else:
+        state = None
+
+    if state is not None:
         if arm.mode == "full":
             model.load_state_dict(state["model"], strict=False)
         else:
@@ -259,6 +270,7 @@ def train_arm(
         global_step = state["global_step"]
         train_seconds = state.get("train_seconds", 0.0)
         log.info("resumed %s from epoch %d (step %d)", run_name, start_epoch, global_step)
+        del state
 
     csv = CSVLogger(
         run_dir / "train_log.csv",
@@ -415,7 +427,7 @@ def train_arm(
             if arm.mode == "full"
             else adapter_state_dict(model)
         )
-        torch.save({"state_dict": payload, "arm": asdict(arm), "seed": seed}, weights_path)
+        robust_save({"state_dict": payload, "arm": asdict(arm), "seed": seed}, weights_path)
         ckpt_bytes = weights_path.stat().st_size
         log.info("saved %s (%s)", weights_path.name, human_bytes(ckpt_bytes))
     else:
@@ -470,18 +482,20 @@ def _save_state(path, model, opt, sched, scaler, epoch, global_step, train_secon
         if arm.mode == "full"
         else adapter_state_dict(model)
     )
-    tmp = Path(str(path) + ".tmp")
-    torch.save(
-        {
-            "model": payload,
-            "optimizer": opt.state_dict(),
-            "scheduler": sched.state_dict(),
-            "scaler": scaler.state_dict() if scaler.is_enabled() else None,
-            "epoch": epoch,
-            "global_step": global_step,
-            "train_seconds": train_seconds,
-            "cpu_rng": torch.get_rng_state(),
-        },
-        tmp,
-    )
-    tmp.replace(path)
+    try:
+        robust_save(
+            {
+                "model": payload,
+                "optimizer": opt.state_dict(),
+                "scheduler": sched.state_dict(),
+                "scaler": scaler.state_dict() if scaler.is_enabled() else None,
+                "epoch": epoch,
+                "global_step": global_step,
+                "train_seconds": train_seconds,
+                "cpu_rng": torch.get_rng_state(),
+            },
+            path,
+        )
+    except IOError as exc:
+        log.warning("could not write %s (%s); training continues unchecked",
+                    Path(path).name, exc)

@@ -168,6 +168,83 @@ def timed(label: str):
 
 
 # --------------------------------------------------------------------------------------
+# Crash-durable checkpoints
+# --------------------------------------------------------------------------------------
+def robust_save(obj, path: str | Path, verify: bool = True, keep_backup: bool = True) -> Path:
+    """Save a torch object so that a killed session cannot leave it unusable.
+
+    Google Drive's FUSE mount uploads asynchronously: a file that finished writing
+    locally can still be truncated in the cloud if the VM is reclaimed a second later.
+    A resume checkpoint that crashes the next run is worse than no checkpoint, so:
+
+    1. write to a temporary file next to the target;
+    2. flush and fsync, forcing the mount to commit rather than buffer;
+    3. read it straight back to prove it deserialises;
+    4. rotate the previous good file to `.bak` before swapping the new one in.
+
+    The `.bak` generation is the part that matters for long runs: if the newest
+    checkpoint is corrupt anyway, `robust_load` falls back to the previous one, so the
+    worst case is losing one checkpoint interval rather than the whole arm.
+    """
+    import torch
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+
+    with open(tmp, "wb") as fh:
+        torch.save(obj, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    if verify:
+        try:
+            torch.load(tmp, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            raise IOError(f"checkpoint failed verification, not written: {exc}") from exc
+
+    if keep_backup and path.exists():
+        backup = path.with_suffix(path.suffix + ".bak")
+        try:
+            backup.unlink(missing_ok=True)
+            path.replace(backup)
+        except OSError:
+            pass
+    tmp.replace(path)
+    return path
+
+
+def robust_load(path: str | Path, validate=None, **load_kwargs):
+    """Load a `robust_save` file, falling back to the `.bak` generation.
+
+    Returns None if neither generation is usable, having removed the bad files so the
+    caller simply starts fresh instead of failing.
+
+    `validate` is an optional callable raising on a structurally wrong payload — a file
+    can deserialise cleanly and still be missing keys if it was truncated at a lucky
+    boundary.
+    """
+    import torch
+
+    path = Path(path)
+    for candidate, label in ((path, "checkpoint"), (path.with_suffix(path.suffix + ".bak"), "backup")):
+        if not candidate.exists():
+            continue
+        try:
+            obj = torch.load(candidate, map_location="cpu", weights_only=False, **load_kwargs)
+            if validate is not None:
+                validate(obj)
+            if label == "backup":
+                log.warning("primary checkpoint unusable; recovered from %s", candidate.name)
+            return obj
+        except Exception as exc:
+            log.warning("discarding unusable %s %s (%s)", label, candidate.name, exc)
+            candidate.unlink(missing_ok=True)
+    return None
+
+
+# --------------------------------------------------------------------------------------
 # Progress reporting
 # --------------------------------------------------------------------------------------
 def progress(iterable=None, total: int | None = None, desc: str = "", leave: bool = True,

@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .utils import eta_string, log, progress
+from .utils import eta_string, log, progress, robust_load, robust_save
 
 from .metric_meta import (  # re-exported for convenience
     EMBEDDING_METRICS,
@@ -60,7 +60,7 @@ def predict(
     prior_timesteps: int = 20,
     desc: str = "predict",
     checkpoint_path=None,
-    checkpoint_every: int = 10,
+    checkpoint_every: int = 5,
 ) -> dict[str, torch.Tensor]:
     """Run the encoder over the test set. Returns CPU float32 tensors.
 
@@ -75,16 +75,31 @@ def predict(
     backbones, clip_voxels, priors, targets, rows = [], [], [], [], []
 
     start_batch = 0
-    if checkpoint_path is not None and Path(checkpoint_path).exists():
-        part = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        backbones = [part["backbone"]]
-        clip_voxels = [part["clip_voxels"]]
-        targets = [part["target"]]
-        rows = [part["rows"]]
-        if "prior" in part:
-            priors = [part["prior"]]
-        start_batch = int(part["batches_done"])
-        log.info("resuming %s from batch %d", desc, start_batch)
+    if checkpoint_path is not None:
+        def _validate(part):
+            required = ("backbone", "clip_voxels", "target", "rows", "batches_done")
+            missing = [k for k in required if k not in part]
+            if missing:
+                raise ValueError(f"missing keys {missing}")
+            n = int(part["rows"].shape[0])
+            for k in ("backbone", "clip_voxels", "target"):
+                if part[k].shape[0] != n:
+                    raise ValueError(f"{k} disagrees with rows on length")
+            if "prior" in part and part["prior"].shape[0] != n:
+                raise ValueError("prior disagrees with rows on length")
+
+        part = robust_load(checkpoint_path, validate=_validate)
+        if part is not None:
+            backbones = [part["backbone"]]
+            clip_voxels = [part["clip_voxels"]]
+            targets = [part["target"]]
+            rows = [part["rows"]]
+            if "prior" in part:
+                priors = [part["prior"]]
+            start_batch = int(part["batches_done"])
+            log.info("resuming %s from batch %d (%d samples recovered)",
+                     desc, start_batch, int(part["rows"].shape[0]))
+            del part
 
     total = len(loader)
     t0 = time.time()
@@ -125,9 +140,12 @@ def predict(
             }
             if priors:
                 partial["prior"] = torch.cat(priors)
-            tmp = Path(str(checkpoint_path) + ".tmp")
-            torch.save(partial, tmp)
-            tmp.replace(checkpoint_path)
+            try:
+                robust_save(partial, checkpoint_path)
+            except IOError as exc:
+                # A failed checkpoint must never kill a run that is otherwise fine.
+                log.warning("could not write %s (%s); continuing without a resume point",
+                            Path(checkpoint_path).name, exc)
 
     bar.close()
     result = {

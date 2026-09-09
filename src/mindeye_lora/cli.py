@@ -21,7 +21,7 @@ import numpy as np
 
 from .config import ExperimentConfig, load_config, save_config
 from .env import get_workspace, setup_environment
-from .utils import RunTracker, human_bytes, log, read_json, write_json
+from .utils import RunTracker, human_bytes, log, read_json, robust_save, write_json
 
 
 # --------------------------------------------------------------------------------------
@@ -57,6 +57,27 @@ def _device() -> str:
 
 def _emb_path(ws, cfg):
     return ws["data"] / f"subj{cfg.subj:02d}_clip_{cfg.num_sessions}sess.npy"
+
+
+def safe_torch_load(path, **kw):
+    """torch.load that reports a corrupt file clearly instead of a miniz stack trace.
+
+    Files on a Drive mount can be truncated if the session died mid-upload, and the
+    default error ("failed finding central directory ... internal miniz error") gives no
+    hint about which file or what to do about it.
+    """
+    import torch
+
+    try:
+        return torch.load(str(path), **kw)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read {path}. It is most likely truncated — Google Drive uploads "
+            f"asynchronously, so a file written just before a session was reclaimed can "
+            f"be incomplete. Delete it and re-run the stage that produces it:\n"
+            f"    from pathlib import Path; Path({str(path)!r}).unlink()\n"
+            f"Original error: {exc}"
+        ) from exc
 
 
 def _selected_arms(cfg: ExperimentConfig, names):
@@ -221,7 +242,8 @@ def cmd_predict(args):
                 log.warning("no trained weights for %s — train it first.", run_dir.name)
                 continue
             model, _ = build_arm_model(cfg, arm, train_sub.voxels.shape[1], ws, device)
-            payload = torch.load(weights, map_location=device, weights_only=False)["state_dict"]
+            payload = safe_torch_load(weights, map_location=device,
+                                      weights_only=False)["state_dict"]
             if arm.mode == "full":
                 model.load_state_dict(payload, strict=False)
             else:
@@ -233,8 +255,9 @@ def cmd_predict(args):
                 desc=f"predict {arm.name} seed{seed}",
                 checkpoint_path=partial,
             )
-            torch.save(preds, out)
+            robust_save(preds, out)
             partial.unlink(missing_ok=True)
+            Path(str(partial) + ".bak").unlink(missing_ok=True)
             log.info("saved predictions -> %s", out)
             tracker.finish(run_dir.name)
             from .train import release_cuda
@@ -310,7 +333,7 @@ def cmd_evaluate(args):
             if out.exists() and not args.force:
                 log.info("metrics exist for %s", run_dir.name)
                 continue
-            preds = torch.load(preds_path, map_location="cpu", weights_only=False)
+            preds = safe_torch_load(preds_path, map_location="cpu", weights_only=False)
             pred_emb = preds.get("prior", preds["clip_voxels"])
             metrics = embedding_metrics(pred_emb, preds["target"])
             summary = retrieval_summary(pred_emb, preds["target"])

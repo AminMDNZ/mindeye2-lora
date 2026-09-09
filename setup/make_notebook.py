@@ -229,9 +229,13 @@ md("""
 Runs each trained model over the test set and caches its predicted CLIP embeddings,
 sampled through the diffusion prior. Roughly 12 minutes per arm.
 
-Partial results are written every 10 batches to `predictions.partial.pt` and resumed
-automatically, so a disconnect costs a minute or two rather than the whole arm. Running
-one arm per cell narrows the blast radius further.
+Partial results are written every 5 batches and resumed automatically, so a disconnect
+costs a minute or two rather than the whole arm.
+
+Checkpoints are fsynced, read back to verify, and rotated so the previous good copy
+survives as `.bak` — Google Drive uploads asynchronously, so a file that finished
+writing locally can still be truncated if the VM is reclaimed a moment later. A corrupt
+primary falls back to the backup automatically; nothing needs deleting by hand.
 """),
 code("""
 main(["predict", "--config", CONFIG])
@@ -265,6 +269,22 @@ main(["recon", "--config", CONFIG])
 # real generated images — uncomment on an A100 with disk to spare
 # main(["recon", "--config", CONFIG, "--decoder", "sdxl_unclip",
 #       "--arm", "frozen", "lora_r16", "full", "--n_images", "32"])
+"""),
+
+code("""
+# Inspect resume points — useful after a disconnect, never required.
+# Corrupt files are handled automatically; this just shows what survived.
+from pathlib import Path
+import torch
+
+for p in sorted(Path(os.environ["MINDEYE_LORA_ROOT"]).glob("runs/*/predictions.partial.pt")):
+    try:
+        d = torch.load(p, map_location="cpu", weights_only=False)
+        print(f"{p.parent.name:36s} resumable from batch {d.get('batches_done')}")
+    except Exception as exc:
+        print(f"{p.parent.name:36s} primary unreadable ({str(exc)[:40]}...)")
+        bak = Path(str(p) + ".bak")
+        print(f"{'':36s} backup {'available' if bak.exists() else 'MISSING'}")
 """),
 
 md("""
@@ -326,6 +346,10 @@ fit; apply it in the config, keeping the product at 24. Then **restart the runti
 before retrying: a CUDA OOM in a notebook is sticky, because the traceback holds every
 local in every frame including the model that just failed, so a retry often OOMs before
 training even starts. Nothing on Drive is lost.
+
+**Nothing needs deleting after a crash.** Checkpoints are written durably and kept in
+two generations; a corrupt one falls back to its backup, and if both are bad they are
+removed automatically and that stage restarts. Re-run the same command.
 
 **Is it stuck?** Check the GPU from a second cell:
 `!nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader`.
