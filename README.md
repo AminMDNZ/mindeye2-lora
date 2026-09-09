@@ -316,6 +316,13 @@ That is the VM's 12 GB system memory, not the GPU. `predict` streams to disk so 
 should not recur; if it does, `--num_workers 0` removes the dataloader worker copies,
 and `--batch_size 8` shrinks the per-batch buffers.
 
+**"No data left in file" / EOFError reading a .npy.**
+A prediction array was truncated: Drive uploads asynchronously, so the small
+`meta.json` can land while the 852 MB arrays beside it do not. `PredictionStore` now
+opens every array before declaring a store complete, so a truncated one is detected and
+recomputed automatically rather than being skipped forever on the strength of its
+metadata. Re-run `predict`.
+
 **Session died mid-training.**
 Re-run the same command; nothing needs deleting by hand.
 

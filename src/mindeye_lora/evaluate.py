@@ -90,6 +90,16 @@ class PredictionStore:
             and all(self._path(f).exists() for f in self.fields)
             and (self.dir / "rows.npy").exists()
         )
+        if compatible:
+            # Confirm every array really opens before trusting the resume point.
+            try:
+                for field in self.fields:
+                    np.load(self._path(field), mmap_mode="r")
+            except Exception as exc:
+                log.warning("prediction store at %s is unreadable (%s); starting over",
+                            self.dir.name, exc)
+                compatible = False
+
         for field in self.fields:
             self.arrays[field] = (
                 np.lib.format.open_memmap(self._path(field), mode="r+")
@@ -161,11 +171,54 @@ class PredictionStore:
         )
 
     @classmethod
-    def is_complete(cls, directory) -> bool:
-        meta = read_json(Path(directory) / "meta.json", default=None)
+    def is_complete(cls, directory, verify: bool = True) -> bool:
+        """Is this store usable, not merely marked finished?
+
+        `meta.json` is small and lands on Drive quickly; the 852 MB arrays alongside it
+        do not. If the session ends in between, the metadata claims 1,000 samples while
+        the arrays are truncated — and a completeness check that trusts the metadata
+        would skip the arm forever, leaving a store that fails at read time instead.
+
+        So the arrays are actually opened and their shapes checked. That costs a few
+        milliseconds (memmap headers only, no data read) and turns a silent, permanent
+        failure into an automatic recompute.
+        """
+        directory = Path(directory)
+        meta = read_json(directory / "meta.json", default=None)
         if not meta:
             return False
-        return int(meta.get("samples_done", 0)) >= int(meta["shape"][0])
+        if int(meta.get("samples_done", 0)) < int(meta["shape"][0]):
+            return False
+        if not verify:
+            return True
+
+        expected = tuple(meta["shape"])
+        for field in list(meta.get("fields", [])) + ["rows"]:
+            path = directory / f"{field}.npy"
+            if not path.exists():
+                log.warning("%s: %s missing; will recompute", directory.name, path.name)
+                return False
+            try:
+                arr = np.load(path, mmap_mode="r")
+            except Exception as exc:
+                log.warning("%s: %s unreadable (%s); will recompute",
+                            directory.name, path.name, exc)
+                return False
+            want = (expected[0],) if field == "rows" else expected
+            if tuple(arr.shape) != want:
+                log.warning("%s: %s has shape %s, expected %s; will recompute",
+                            directory.name, path.name, arr.shape, want)
+                return False
+        return True
+
+    @classmethod
+    def clear(cls, directory) -> None:
+        """Remove a partial or corrupt store so the next run starts clean."""
+        directory = Path(directory)
+        if not directory.exists():
+            return
+        for path in list(directory.glob("*.npy")) + [directory / "meta.json"]:
+            path.unlink(missing_ok=True)
 
 
 @torch.no_grad()
@@ -193,6 +246,14 @@ def predict(
     del probe
 
     store = PredictionStore(store_dir, n_total, seq, dim, use_prior=use_prior)
+    # A store whose arrays are truncated cannot be resumed into: its header claims the
+    # full shape while the bytes are absent. Wipe it and start over.
+    if resume and Path(store_dir).exists() and (Path(store_dir) / "meta.json").exists():
+        if not PredictionStore.is_complete(store_dir, verify=True):
+            meta = read_json(Path(store_dir) / "meta.json", default={}) or {}
+            if int(meta.get("samples_done", 0)) >= n_total:
+                log.warning("%s: store marked complete but unreadable; rebuilding", desc)
+                PredictionStore.clear(store_dir)
     start_batch = store.open(resume=resume)
     if start_batch:
         log.info("resuming %s from batch %d", desc, start_batch)
