@@ -17,6 +17,7 @@ Two tiers of metric:
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 from pathlib import Path
 
@@ -24,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .utils import eta_string, log, progress, robust_load, robust_save
+from .utils import eta_string, log, progress, read_json, write_json
 
 from .metric_meta import (  # re-exported for convenience
     EMBEDDING_METRICS,
@@ -50,56 +51,135 @@ def _call_prior_sampler(prior, backbone_out, timesteps: int = 20, cond_scale: fl
     raise AttributeError("Diffusion prior exposes neither p_sample_loop nor sample.")
 
 
+class PredictionStore:
+    """Disk-backed store for one arm's test-set predictions.
+
+    Holding predictions in RAM does not scale: 1,000 test images x 256 tokens x 1664
+    dims is ~1.7 GB per tensor in float32, and an earlier version accumulated four of
+    them in Python lists and then `torch.cat`-ed the lot, briefly doubling it. That is
+    ~13 GB on a 12 GB Colab VM, which appears as a silent session kill rather than a
+    traceback.
+
+    So each tensor is a float16 memmap written batch by batch. Memory stays flat
+    whatever the test-set size, the file on disk *is* the resume checkpoint, and
+    downstream stages map it read-only instead of loading it.
+    """
+
+    FIELDS = ("prior", "clip_voxels", "target")
+
+    def __init__(self, directory, n: int, seq: int, dim: int, use_prior: bool):
+        self.dir = Path(directory)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.n, self.seq, self.dim = n, seq, dim
+        # `clip_voxels` is only ever read as the fallback when there is no diffusion
+        # prior, so storing both wastes ~850 MB of disk and page cache per arm.
+        self.fields = ["prior", "target"] if use_prior else ["clip_voxels", "target"]
+        self.arrays: dict = {}
+        self.meta_path = self.dir / "meta.json"
+
+    def _path(self, field: str) -> Path:
+        return self.dir / f"{field}.npy"
+
+    def open(self, resume: bool = True) -> int:
+        """Create or reattach the memmaps. Returns the number of completed batches."""
+        meta = read_json(self.meta_path, default=None) if resume else None
+        compatible = bool(
+            meta
+            and meta.get("shape") == [self.n, self.seq, self.dim]
+            and sorted(meta.get("fields", [])) == sorted(self.fields)
+            and all(self._path(f).exists() for f in self.fields)
+            and (self.dir / "rows.npy").exists()
+        )
+        for field in self.fields:
+            self.arrays[field] = (
+                np.lib.format.open_memmap(self._path(field), mode="r+")
+                if compatible
+                else np.lib.format.open_memmap(
+                    self._path(field), mode="w+", dtype=np.float16,
+                    shape=(self.n, self.seq, self.dim))
+            )
+        rows_path = self.dir / "rows.npy"
+        self.arrays["rows"] = (
+            np.lib.format.open_memmap(rows_path, mode="r+")
+            if compatible
+            else np.lib.format.open_memmap(rows_path, mode="w+", dtype=np.int64,
+                                           shape=(self.n,))
+        )
+        return int(meta.get("batches_done", 0)) if compatible else 0
+
+    def write(self, start: int, **tensors) -> None:
+        for field, value in tensors.items():
+            arr = self.arrays.get(field)
+            if arr is None:
+                continue
+            data = value.detach().cpu().numpy()
+            arr[start : start + len(data)] = data.astype(arr.dtype)
+
+    def commit(self, batches_done: int, samples_done: int) -> None:
+        for arr in self.arrays.values():
+            arr.flush()
+        write_json(self.meta_path, {
+            "shape": [self.n, self.seq, self.dim], "fields": self.fields,
+            "batches_done": batches_done, "samples_done": samples_done,
+        })
+
+    def close(self) -> None:
+        for arr in self.arrays.values():
+            with contextlib.suppress(Exception):
+                arr.flush()
+        self.arrays.clear()
+
+    @classmethod
+    def load(cls, directory) -> dict:
+        """Map an existing store read-only. Nothing is copied into RAM."""
+        directory = Path(directory)
+        meta = read_json(directory / "meta.json")
+        if meta is None:
+            raise FileNotFoundError(f"No prediction store at {directory}")
+        out = {}
+        for field in list(meta["fields"]) + ["rows"]:
+            path = directory / f"{field}.npy"
+            if path.exists():
+                out[field] = np.load(path, mmap_mode="r")
+        out["_meta"] = meta
+        return out
+
+    @classmethod
+    def is_complete(cls, directory) -> bool:
+        meta = read_json(Path(directory) / "meta.json", default=None)
+        if not meta:
+            return False
+        return int(meta.get("samples_done", 0)) >= int(meta["shape"][0])
+
+
 @torch.no_grad()
 def predict(
     model,
     loader,
+    store_dir,
     device: str = "cuda",
     precision: str = "fp16",
     use_prior: bool = True,
     prior_timesteps: int = 20,
     desc: str = "predict",
-    checkpoint_path=None,
     checkpoint_every: int = 5,
-) -> dict[str, torch.Tensor]:
-    """Run the encoder over the test set. Returns CPU float32 tensors.
-
-    Sampling 1,000 images through the diffusion prior takes ~12 minutes per arm, which
-    is long enough that a Colab disconnect used to throw the whole arm away. Partial
-    results are now written every `checkpoint_every` batches and resumed automatically.
-    """
+    resume: bool = True,
+) -> "PredictionStore":
+    """Run the encoder over the test set, streaming results straight to disk."""
     import time
 
     model.eval()
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[precision]
-    backbones, clip_voxels, priors, targets, rows = [], [], [], [], []
 
-    start_batch = 0
-    if checkpoint_path is not None:
-        def _validate(part):
-            required = ("backbone", "clip_voxels", "target", "rows", "batches_done")
-            missing = [k for k in required if k not in part]
-            if missing:
-                raise ValueError(f"missing keys {missing}")
-            n = int(part["rows"].shape[0])
-            for k in ("backbone", "clip_voxels", "target"):
-                if part[k].shape[0] != n:
-                    raise ValueError(f"{k} disagrees with rows on length")
-            if "prior" in part and part["prior"].shape[0] != n:
-                raise ValueError("prior disagrees with rows on length")
+    n_total = len(loader.dataset)
+    probe = next(iter(loader))[1]
+    seq, dim = int(probe.shape[-2]), int(probe.shape[-1])
+    del probe
 
-        part = robust_load(checkpoint_path, validate=_validate)
-        if part is not None:
-            backbones = [part["backbone"]]
-            clip_voxels = [part["clip_voxels"]]
-            targets = [part["target"]]
-            rows = [part["rows"]]
-            if "prior" in part:
-                priors = [part["prior"]]
-            start_batch = int(part["batches_done"])
-            log.info("resuming %s from batch %d (%d samples recovered)",
-                     desc, start_batch, int(part["rows"].shape[0]))
-            del part
+    store = PredictionStore(store_dir, n_total, seq, dim, use_prior=use_prior)
+    start_batch = store.open(resume=resume)
+    if start_batch:
+        log.info("resuming %s from batch %d", desc, start_batch)
 
     total = len(loader)
     t0 = time.time()
@@ -107,8 +187,10 @@ def predict(
     if start_batch:
         bar.update(start_batch)
 
+    written = 0
     for i, (voxel, clip_target, _img, row) in enumerate(loader):
-        if i < start_batch:          # already covered by the checkpoint
+        if i < start_batch:
+            written += len(row)
             continue
         voxel = voxel.to(device, non_blocking=True).unsqueeze(1)
         with torch.autocast("cuda", dtype=dtype, enabled=precision != "fp32"):
@@ -116,57 +198,62 @@ def predict(
             out = model.backbone(latent)
         backbone_out = out[0] if isinstance(out, (tuple, list)) else out
         cv = out[1] if isinstance(out, (tuple, list)) and len(out) > 1 else out
-        backbones.append(backbone_out.float().cpu())
-        clip_voxels.append(cv.float().cpu())
-        targets.append(clip_target.float())
-        rows.append(row)
+
+        payload = {"target": clip_target.float()}
         if use_prior and hasattr(model, "diffusion_prior"):
             with torch.autocast("cuda", dtype=dtype, enabled=precision != "fp32"):
-                pr = _call_prior_sampler(model.diffusion_prior, backbone_out,
-                                         timesteps=prior_timesteps)
-            priors.append(pr.float().cpu())
+                payload["prior"] = _call_prior_sampler(
+                    model.diffusion_prior, backbone_out, timesteps=prior_timesteps
+                ).float()
+        else:
+            payload["clip_voxels"] = cv.float()
+
+        store.write(written, **payload)
+        store.arrays["rows"][written : written + len(row)] = row.numpy()
+        written += len(row)
+        del payload, backbone_out, cv, out, latent, voxel
 
         bar.update(1)
-        done = i + 1
-        if hasattr(bar, "set_postfix"):
-            bar.set_postfix_str(eta_string(done - start_batch, total - start_batch,
+        if hasattr(bar, "set_postfix_str"):
+            bar.set_postfix_str(eta_string(i + 1 - start_batch, total - start_batch,
                                            time.time() - t0))
-
-        if checkpoint_path is not None and done % checkpoint_every == 0 and done < total:
-            partial = {
-                "backbone": torch.cat(backbones), "clip_voxels": torch.cat(clip_voxels),
-                "target": torch.cat(targets), "rows": torch.cat(rows),
-                "batches_done": done,
-            }
-            if priors:
-                partial["prior"] = torch.cat(priors)
-            try:
-                robust_save(partial, checkpoint_path)
-            except IOError as exc:
-                # A failed checkpoint must never kill a run that is otherwise fine.
-                log.warning("could not write %s (%s); continuing without a resume point",
-                            Path(checkpoint_path).name, exc)
+        if (i + 1) % checkpoint_every == 0 or (i + 1) == total:
+            store.commit(i + 1, written)
 
     bar.close()
-    result = {
-        "backbone": torch.cat(backbones),
-        "clip_voxels": torch.cat(clip_voxels),
-        "target": torch.cat(targets),
-        "rows": torch.cat(rows),
-    }
-    if priors:
-        result["prior"] = torch.cat(priors)
-    return result
+    store.commit(total, written)
+    return store
 
 
 # --------------------------------------------------------------------------------------
 # CLIP-space metrics
 # --------------------------------------------------------------------------------------
-def _flat_norm(x: torch.Tensor) -> torch.Tensor:
-    return F.normalize(x.flatten(1).float(), dim=-1)
+def _as_tensor(x) -> torch.Tensor:
+    """Accept a torch tensor or a numpy memmap. Memmaps arrive from PredictionStore."""
+    if isinstance(x, torch.Tensor):
+        return x
+    return torch.from_numpy(np.ascontiguousarray(x))
 
 
-def two_way_identification(pred: torch.Tensor, target: torch.Tensor, chunk: int = 256) -> np.ndarray:
+def _flat_norm(x, chunk: int = 256) -> torch.Tensor:
+    """L2-normalised flattened embeddings, materialised in chunks.
+
+    A 1,000 x 256 x 1664 memmap is 1.7 GB in float32, so converting it wholesale
+    reintroduces exactly the memory blow-up the store exists to avoid. Normalising in
+    chunks keeps the peak to one chunk at a time.
+    """
+    n = len(x)
+    out = None
+    for start in range(0, n, chunk):
+        block = _as_tensor(x[start : start + chunk]).flatten(1).float()
+        block = F.normalize(block, dim=-1)
+        if out is None:
+            out = torch.empty((n, block.shape[1]), dtype=torch.float32)
+        out[start : start + len(block)] = block
+    return out
+
+
+def two_way_identification(pred, target, chunk: int = 256) -> np.ndarray:
     """Per-sample probability that the true target scores higher than a random distractor."""
     p, t = _flat_norm(pred), _flat_norm(target)
     n = p.shape[0]
@@ -181,7 +268,7 @@ def two_way_identification(pred: torch.Tensor, target: torch.Tensor, chunk: int 
     return out
 
 
-def retrieval_percentile(pred: torch.Tensor, target: torch.Tensor) -> np.ndarray:
+def retrieval_percentile(pred, target) -> np.ndarray:
     """1.0 means the correct image was ranked first among all test images."""
     p, t = _flat_norm(pred), _flat_norm(target)
     sim = p @ t.T
@@ -190,11 +277,11 @@ def retrieval_percentile(pred: torch.Tensor, target: torch.Tensor) -> np.ndarray
     return 1.0 - ranks / max(1, n - 1)
 
 
-def cosine_per_sample(pred: torch.Tensor, target: torch.Tensor) -> np.ndarray:
+def cosine_per_sample(pred, target) -> np.ndarray:
     return (_flat_norm(pred) * _flat_norm(target)).sum(-1).numpy()
 
 
-def embedding_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, np.ndarray]:
+def embedding_metrics(pred, target) -> dict[str, np.ndarray]:
     return {
         "cosine": cosine_per_sample(pred, target),
         "two_way_clip": two_way_identification(pred, target),
@@ -202,7 +289,7 @@ def embedding_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, np.
     }
 
 
-def retrieval_summary(pred: torch.Tensor, target: torch.Tensor, pool: int = 300, seed: int = 0) -> dict:
+def retrieval_summary(pred, target, pool: int = 300, seed: int = 0) -> dict:
     """Top-1 retrieval within random pools of `pool` candidates (the paper's protocol)."""
     rng = np.random.default_rng(seed)
     p, t = _flat_norm(pred), _flat_norm(target)

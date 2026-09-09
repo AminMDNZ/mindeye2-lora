@@ -303,6 +303,11 @@ including the model that just failed, so a retry often OOMs before training star
 `cmd_train` frees what it can, but if the next attempt fails at `model.to(device)`,
 restart the runtime — nothing on Drive is lost.
 
+**"Your session crashed after using all available RAM."**
+That is the VM's 12 GB system memory, not the GPU. `predict` streams to disk so this
+should not recur; if it does, `--num_workers 0` removes the dataloader worker copies,
+and `--batch_size 8` shrinks the per-batch buffers.
+
 **Session died mid-training.**
 Re-run the same command; nothing needs deleting by hand.
 
@@ -324,13 +329,20 @@ clean boundary rather than being killed mid-write.
 | `assets` (remote HDF5 fetch) | rows fetched | 256-row chunk |
 | `precompute` (CLIP embeddings) | images embedded | ~10 batches |
 | `train` | batch within epoch, run within sweep | one epoch |
-| `predict` | batch within arm, run within sweep | 5 batches |
+| `predict` | batch within arm, run within sweep | 5 batches (memmap on disk) |
 | `recon` (SDXL decode) | images decoded | ~3 batches |
 | `evaluate` | images per metric | whole arm (fast) |
 | `compare` | metrics processed | whole stage (fast) |
 
 Nothing needs deleting after a crash: re-run the same command and each stage picks up
 from its last checkpoint.
+
+**Memory.** `predict` streams to float16 memmaps under `runs/<run>/predictions/`
+rather than accumulating in RAM. Holding 1,000 x 256 x 1664 predictions in memory is
+~1.7 GB per tensor in float32, and concatenating several of them exceeds a standard
+12 GB Colab VM — which appears as "your session crashed after using all available RAM"
+with no traceback. Downstream stages map the store read-only, and metrics normalise in
+chunks, so peak memory is independent of test-set size.
 
 **Progress reporting.** Three levels, so you always know where you are:
 

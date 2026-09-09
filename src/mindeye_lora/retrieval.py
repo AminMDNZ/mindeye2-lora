@@ -47,16 +47,19 @@ def retrieve_topk(
 
 
 def build_retrieval_output(
-    predictions_path: str | Path,
+    store_dir: str | Path,
     out_path: str | Path,
     k: int = 3,
     n_items: int | None = None,
 ) -> Path:
-    """Produce a retrieval result file from a run's cached predictions."""
-    preds = torch.load(str(predictions_path), map_location="cpu", weights_only=False)
-    pred_emb = preds.get("prior", preds["clip_voxels"])
-    target = preds["target"]
-    rows = preds["rows"]
+    """Produce a retrieval result file from a run's streamed predictions."""
+    from .evaluate import PredictionStore
+
+    preds = PredictionStore.load(store_dir)
+    pred_emb = torch.from_numpy(np.ascontiguousarray(
+        preds.get("prior", preds["clip_voxels"])))
+    target = torch.from_numpy(np.ascontiguousarray(preds["target"]))
+    rows = torch.from_numpy(np.asarray(preds["rows"]))
 
     indices, sims, rank = retrieve_topk(pred_emb, target, k=k)
     pool_size = int(target.shape[0])

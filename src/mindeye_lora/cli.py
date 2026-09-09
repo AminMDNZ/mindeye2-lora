@@ -209,7 +209,7 @@ def cmd_predict(args):
 
     from .assets import AssetPaths, load_asset_meta
     from .data import MindEyeDataset, build_subsets, make_loaders, normalise_voxels
-    from .evaluate import predict
+    from .evaluate import PredictionStore, predict
     from .lora import load_adapter_state_dict
     from .train import build_arm_model
 
@@ -232,8 +232,8 @@ def cmd_predict(args):
     for seed in pred_seeds:
         for arm in pred_arms:
             run_dir = ws.run_dir(cfg.run_name(arm.name, seed))
-            out = run_dir / "predictions.pt"
-            if out.exists() and not args.force:
+            store_dir = run_dir / "predictions"
+            if PredictionStore.is_complete(store_dir) and not args.force:
                 tracker.finish(run_dir.name, skipped=True)
                 continue
             tracker.start(run_dir.name)
@@ -248,17 +248,14 @@ def cmd_predict(args):
                 model.load_state_dict(payload, strict=False)
             else:
                 load_adapter_state_dict(model, payload)
-            partial = run_dir / "predictions.partial.pt"
-            preds = predict(
-                model, test_loader, device=device, precision=cfg.precision,
+            store = predict(
+                model, test_loader, store_dir, device=device, precision=cfg.precision,
                 use_prior=cfg.use_prior, prior_timesteps=args.prior_timesteps,
                 desc=f"predict {arm.name} seed{seed}",
-                checkpoint_path=partial,
+                resume=not args.force,
             )
-            robust_save(preds, out)
-            partial.unlink(missing_ok=True)
-            Path(str(partial) + ".bak").unlink(missing_ok=True)
-            log.info("saved predictions -> %s", out)
+            store.close()
+            log.info("predictions streamed to %s", store_dir)
             tracker.finish(run_dir.name)
             from .train import release_cuda
 
@@ -269,6 +266,7 @@ def cmd_predict(args):
 def cmd_recon(args):
     """Generate images with the SDXL decoder, falling back to retrieval if unavailable."""
     ws, cfg = _ws(args), _cfg(args)
+    from .evaluate import PredictionStore
     from .recon import reconstruct_for_run
     from .retrieval import build_retrieval_output
 
@@ -279,8 +277,8 @@ def cmd_recon(args):
     for seed in seeds:
         for arm in _selected_arms(cfg, args.arm):
             run_dir = ws.run_dir(cfg.run_name(arm.name, seed))
-            preds = run_dir / "predictions.pt"
-            if not preds.exists():
+            store_dir = run_dir / "predictions"
+            if not PredictionStore.is_complete(store_dir):
                 log.warning("no predictions for %s — run `predict` first.", run_dir.name)
                 continue
 
@@ -293,7 +291,7 @@ def cmd_recon(args):
                 else:
                     try:
                         reconstruct_for_run(
-                            preds, out, ws, n_images=n_images, decoder=decoder,
+                            store_dir, out, ws, n_images=n_images, decoder=decoder,
                             device=_device(), num_steps=args.num_steps,
                             batch_size=args.batch_size or 4, unclip_dir=args.unclip_dir,
                         )
@@ -308,7 +306,8 @@ def cmd_recon(args):
                 if target.exists() and not args.force:
                     log.info("retrieval output exists for %s", run_dir.name)
                     continue
-                build_retrieval_output(preds, target, k=cfg.retrieval_k, n_items=n_images)
+                build_retrieval_output(store_dir, target, k=cfg.retrieval_k,
+                                       n_items=n_images)
 
 
 def cmd_evaluate(args):
@@ -316,7 +315,10 @@ def cmd_evaluate(args):
     import torch
 
     from .assets import AssetPaths, load_asset_meta
-    from .evaluate import ImageMetricSuite, embedding_metrics, retrieval_summary, save_per_sample
+    from .evaluate import (
+        ImageMetricSuite, PredictionStore, embedding_metrics, retrieval_summary,
+        save_per_sample,
+    )
     from .recon import load_ground_truth
 
     meta = load_asset_meta(ws, cfg.subj, cfg.num_sessions)
@@ -326,14 +328,14 @@ def cmd_evaluate(args):
     for seed in [int(s) for s in (args.seed or cfg.seeds)]:
         for arm in _selected_arms(cfg, args.arm):
             run_dir = ws.run_dir(cfg.run_name(arm.name, seed))
-            preds_path = run_dir / "predictions.pt"
-            if not preds_path.exists():
+            store_dir = run_dir / "predictions"
+            if not PredictionStore.is_complete(store_dir):
                 continue
             out = run_dir / "per_sample_metrics.npz"
             if out.exists() and not args.force:
                 log.info("metrics exist for %s", run_dir.name)
                 continue
-            preds = safe_torch_load(preds_path, map_location="cpu", weights_only=False)
+            preds = PredictionStore.load(store_dir)
             pred_emb = preds.get("prior", preds["clip_voxels"])
             metrics = embedding_metrics(pred_emb, preds["target"])
             summary = retrieval_summary(pred_emb, preds["target"])
@@ -352,7 +354,7 @@ def cmd_evaluate(args):
                     padded[:n] = v
                     metrics[k] = padded
 
-            save_per_sample(out, metrics, preds["rows"].numpy())
+            save_per_sample(out, metrics, np.asarray(preds["rows"]))
             write_json(run_dir / "retrieval_summary.json", summary)
             log.info("%s | cos=%.4f two-way=%.4f fwd@1=%.3f", run_dir.name,
                      float(np.mean(metrics["cosine"])),
@@ -581,8 +583,13 @@ def cmd_status(args):
                 state = "done" if r.get("completed") else f"partial(ep {r['epochs_completed']})"
             elif (d / "state.pt").exists():
                 state = "in progress"
-            extras = [n for n in ("predictions.pt", "reconstructions.pt",
-                                  "per_sample_metrics.npz") if (d / n).exists()]
+            extras = []
+            from .evaluate import PredictionStore
+
+            if PredictionStore.is_complete(d / "predictions"):
+                extras.append("predictions")
+            extras += [n for n in ("reconstructions.pt", "retrieval.pt",
+                                   "per_sample_metrics.npz") if (d / n).exists()]
             print(f"  {d.name:46s} {state:18s} {' '.join(extras)}")
 
 

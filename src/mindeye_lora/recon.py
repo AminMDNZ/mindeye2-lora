@@ -188,7 +188,7 @@ def unclip_reconstruct(
 # stage entry point
 # --------------------------------------------------------------------------------------
 def reconstruct_for_run(
-    predictions_path: Path,
+    predictions_path: Path,   # directory holding the streamed PredictionStore
     out_path: Path,
     ws,
     n_images: int,
@@ -204,8 +204,13 @@ def reconstruct_for_run(
         log.info("decoder disabled — skipping reconstruction.")
         return None
 
-    preds = torch.load(predictions_path, map_location="cpu", weights_only=False)
-    emb = preds.get("prior", preds["backbone"])[:n_images]
+    from .evaluate import PredictionStore
+
+    preds = PredictionStore.load(predictions_path)
+    # Slice first, then materialise: the store is a memmap and the full array is ~1.7 GB.
+    source = preds.get("prior", preds["clip_voxels"])
+    emb = torch.from_numpy(np.ascontiguousarray(source[:n_images])).float()
+    rows = torch.from_numpy(np.asarray(preds["rows"][:n_images]))
 
     from .upstream import load_upstream
 
@@ -227,7 +232,7 @@ def reconstruct_for_run(
                                 upstream_utils=up.utils, checkpoint_path=partial)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    robust_save({"recons": images, "rows": preds["rows"][:n_images]}, out_path)
+    robust_save({"recons": images, "rows": rows}, out_path)
     partial.unlink(missing_ok=True)
     Path(str(partial) + ".bak").unlink(missing_ok=True)
     log.info("saved %d reconstructions -> %s", len(images), out_path.name)
