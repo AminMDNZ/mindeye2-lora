@@ -169,14 +169,18 @@ def load_sharded_state_dict(engine, shard_dir: Path) -> None:
 
     index = json.loads((Path(shard_dir) / "index.json").read_text())
     own = dict(engine.state_dict())
-    loaded = missing = 0
+    loaded = missing = skipped_embedder = 0
     for name in index["shards"]:
         shard = torch.load(Path(shard_dir) / name, map_location="cpu", weights_only=False)
         with torch.no_grad():
             for key, value in shard.items():
                 target = own.get(key)
                 if target is None:
-                    missing += 1
+                    # embedder 0 is deliberately absent; do not report it as a problem
+                    if "conditioner.embedders.0." in key:
+                        skipped_embedder += 1
+                    else:
+                        missing += 1
                     continue
                 if tuple(target.shape) != tuple(value.shape):
                     log.warning("shape mismatch for %s: %s vs %s", key,
@@ -186,58 +190,101 @@ def load_sharded_state_dict(engine, shard_dir: Path) -> None:
                 target.copy_(value.to(device=target.device, dtype=target.dtype))
                 loaded += 1
         del shard
-    log.info("decoder weights: %d loaded, %d unmatched", loaded, missing)
+    log.info("decoder weights: %d loaded, %d unmatched, %d skipped (dropped embedder)",
+             loaded, missing, skipped_embedder)
+    if missing:
+        log.warning("%d weights had no home in the engine — reconstructions may be wrong",
+                    missing)
 
 
 def build_diffusion_engine(
     ckpt_path: Path, config_path: Path, device: str = "cuda", num_steps: int = 38,
-    sharded: bool = True, dtype=None,
+    sharded: bool = True, dtype=None, drop_image_embedder: bool = True,
 ):
+    """Construct the SDXL unCLIP engine small enough to fit a 16 GB card.
+
+    Three things matter here, all learned the hard way on a T4:
+
+    1. **Construct in fp16.** `DiffusionEngine` instantiates and moves its submodules
+       during `__init__`, so converting afterwards is too late — the OOM happens inside
+       the constructor. Setting the default dtype around construction makes every module
+       come out half precision from the start.
+
+    2. **Drop the image embedder.** `FrozenOpenCLIPImageEmbedder` is 1.9B parameters
+       (3.6 GB even in fp16) and exists to encode a real image into a CLIP embedding. We
+       already *have* the embedding — that is the model's output — so it is pure
+       overhead at inference. Removing it from the conditioner config is the single
+       biggest saving available.
+
+    3. **Build on CPU, then move.** Keeps a transient GPU copy from colliding with the
+       weights being streamed in.
+    """
     import importlib
 
     from omegaconf import OmegaConf
 
-    # Either spelling works once ensure_generative_models has aliased them.
+    dtype = dtype if dtype is not None else torch.float16
     try:
         DiffusionEngine = importlib.import_module("sgm.models.diffusion").DiffusionEngine
     except ModuleNotFoundError:
         DiffusionEngine = importlib.import_module(
             "generative_models.sgm.models.diffusion").DiffusionEngine
 
-    dtype = dtype if dtype is not None else torch.float16
     cfg = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     params = cfg["model"]["params"]
     params["sampler_config"]["params"]["num_steps"] = num_steps
     params["first_stage_config"]["target"] = "sgm.models.autoencoder.AutoencoderKL"
 
-    engine = DiffusionEngine(
-        network_config=params["network_config"],
-        denoiser_config=params["denoiser_config"],
-        first_stage_config=params["first_stage_config"],
-        conditioner_config=params["conditioner_config"],
-        sampler_config=params["sampler_config"],
-        scale_factor=params["scale_factor"],
-        disable_first_stage_autocast=params["disable_first_stage_autocast"],
-    )
+    conditioner = params["conditioner_config"]
+    dropped = []
+    if drop_image_embedder:
+        kept = []
+        for emb in conditioner["params"]["emb_models"]:
+            target = str(emb.get("target", ""))
+            if "ImageEmbedder" in target:
+                dropped.append(target.rsplit(".", 1)[-1])
+                continue
+            kept.append(emb)
+        conditioner["params"]["emb_models"] = kept
+    # Any embedder that names a device should build on CPU; we move the whole engine.
+    for emb in conditioner["params"]["emb_models"]:
+        if isinstance(emb.get("params"), dict) and "device" in emb["params"]:
+            emb["params"]["device"] = "cpu"
+    if dropped:
+        log.info("decoder: dropped %s (embedding supplied directly, saves ~3.6 GB)",
+                 ", ".join(dropped))
+
+    previous_dtype = torch.get_default_dtype()
+    if dtype == torch.float16:
+        torch.set_default_dtype(torch.float16)
+    try:
+        engine = DiffusionEngine(
+            network_config=params["network_config"],
+            denoiser_config=params["denoiser_config"],
+            first_stage_config=params["first_stage_config"],
+            conditioner_config=conditioner,
+            sampler_config=params["sampler_config"],
+            scale_factor=params["scale_factor"],
+            disable_first_stage_autocast=params["disable_first_stage_autocast"],
+        )
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+    n_params = sum(p.numel() for p in engine.parameters())
+    log.info("decoder built: %.2fB parameters (%s)", n_params / 1e9,
+             "fp16" if dtype == torch.float16 else str(dtype))
+
     if sharded:
-        # Half precision *before* moving to the GPU. The engine is instantiated in fp32,
-        # and its parts are large: the FrozenOpenCLIPImageEmbedder is 1.9B parameters
-        # (7.6 GB fp32) and SDXL's UNet another 2.6B, so a fp32 engine needs ~14 GB
-        # before a single image is decoded and OOMs a 16 GB card during `.to(device)`.
-        # The shards are fp16 anyway, so nothing is lost by matching them.
-        if dtype == torch.float16:
-            engine = engine.half()
+        engine = engine.half() if dtype == torch.float16 else engine
         engine = engine.to(device).eval().requires_grad_(False)
         if torch.cuda.is_available():
-            log.info("decoder on GPU: %.1f GB allocated",
-                     torch.cuda.memory_allocated() / 1024**3)
+            log.info("decoder on GPU: %.1f GB allocated, %.1f GB free",
+                     torch.cuda.memory_allocated() / 1024**3,
+                     torch.cuda.mem_get_info()[0] / 1024**3)
         load_sharded_state_dict(engine, ckpt_path)
     else:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        missing, unexpected = engine.load_state_dict(ckpt.get("state_dict", ckpt),
-                                                     strict=False)
-        if missing:
-            log.warning("decoder: %d missing keys (e.g. %s)", len(missing), list(missing)[:3])
+        engine.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
         engine = engine.to(device).eval().requires_grad_(False)
         del ckpt
     torch.cuda.empty_cache()
@@ -364,9 +411,21 @@ def reconstruct_for_run(
         log.info("before decoder build: %.1f GB free",
                  torch.cuda.mem_get_info()[0] / 1024**3)
 
-    engine = build_diffusion_engine(shard_dir, config_path, device=device,
-                                    num_steps=num_steps, sharded=True)
-    suffix = _vector_suffix(engine, device)
+    try:
+        engine = build_diffusion_engine(shard_dir, config_path, device=device,
+                                        num_steps=num_steps, sharded=True,
+                                        drop_image_embedder=True)
+        suffix = _vector_suffix(engine, device)
+    except Exception as exc:
+        # The image embedder is unused when embeddings are supplied directly, but if
+        # upstream's conditioner insists on it, fall back rather than fail outright.
+        log.warning("decoder build without the image embedder failed (%s); retrying "
+                    "with it (needs ~3.6 GB more VRAM)", exc)
+        release_cuda(locals().get("engine"))
+        engine = build_diffusion_engine(shard_dir, config_path, device=device,
+                                        num_steps=num_steps, sharded=True,
+                                        drop_image_embedder=False)
+        suffix = _vector_suffix(engine, device)
     out_path = Path(out_path)
     partial = out_path.with_name(out_path.stem + ".partial.pt")
     images = unclip_reconstruct(engine, emb, suffix, device=device, batch_size=batch_size,
