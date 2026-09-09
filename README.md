@@ -151,9 +151,15 @@ The SDXL unCLIP decoder is a separate 18 GB download; see below.
 
 `--decoder sdxl_unclip` runs the paper's decoder. It is optional and heavy:
 
-- 18 GB checkpoint, downloaded to *local* disk by default (`/content/unclip_cache`),
-  then slimmed to fp16 once and kept on Drive so later sessions skip the big pull.
+- 18 GB checkpoint, downloaded to *local* disk (`/content/unclip_cache`), then split
+  once into ~1.5 GB fp16 shards kept on Drive (~9 GB total). The raw file is deleted
+  afterwards and later sessions reuse the shards.
+- **Never loaded whole.** `torch.load` on 18 GB needs 18 GB of RAM and kills a standard
+  12 GB Colab VM outright. Sharding reads the source with `mmap=True`, casts tensor by
+  tensor, and streams shards into a GPU-resident engine, so peak RAM is about one shard.
 - Needs Stability's `sgm` package, which ships inside the MindEyeV2 clone.
+- Roughly 4 s/image on a T4; the encoder is not loaded during this stage, so ~7 GB of
+  VRAM is enough.
 
 **Every statistic in this project works with `--decoder none.`** The decoder is frozen
 and identical across arms, so it contributes no between-arm variance. The primary

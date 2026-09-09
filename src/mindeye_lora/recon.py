@@ -11,6 +11,7 @@ fp16 once and keep the slim copy on Drive so later sessions skip the 18 GB pull.
 """
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 from pathlib import Path
@@ -61,34 +62,103 @@ def find_unclip_config(upstream_dir: Path) -> Path:
     )
 
 
-def download_unclip_checkpoint(target_dir: Path, slim_path: Path | None = None) -> Path:
-    """Fetch the 18 GB unCLIP checkpoint, reusing a slimmed fp16 copy when present."""
-    if slim_path and Path(slim_path).exists():
-        log.info("using slimmed decoder checkpoint %s (%s)", slim_path,
-                 human_bytes(Path(slim_path).stat().st_size))
-        return Path(slim_path)
+def download_unclip_checkpoint(target_dir: Path) -> Path:
+    """Fetch the 18 GB unCLIP checkpoint to local disk (not Drive)."""
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     return hf_download(UNCLIP_CKPT, target_dir)
 
 
-def slim_unclip_checkpoint(src: Path, dst: Path) -> Path:
-    """Cast the decoder weights to fp16 (roughly halves 18 GB) for cheap re-loading."""
-    dst = Path(dst)
-    if dst.exists():
-        return dst
-    log.info("slimming decoder checkpoint to fp16 ...")
-    ckpt = torch.load(src, map_location="cpu", weights_only=False)
+def shard_unclip_checkpoint(src: Path, shard_dir: Path, shard_gb: float = 1.5) -> Path:
+    """Split the 18 GB decoder checkpoint into fp16 shards without ever holding it whole.
+
+    `torch.load` on the full file needs ~18 GB of RAM, which kills a standard 12 GB
+    Colab VM outright ("your session crashed after using all available RAM"). Loading
+    with `mmap=True` keeps the tensors on disk and pages them in on demand, so we can
+    walk the state dict, cast each tensor to fp16, and write ~1.5 GB shards. Peak RAM
+    stays around one shard.
+
+    Done once; later sessions reuse the shards.
+    """
+    import torch
+
+    shard_dir = Path(shard_dir)
+    index_path = shard_dir / "index.json"
+    if index_path.exists():
+        log.info("using existing decoder shards in %s", shard_dir)
+        return shard_dir
+    shard_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("sharding %s (%s) -> fp16 shards", src.name, human_bytes(src.stat().st_size))
+    try:
+        ckpt = torch.load(src, map_location="cpu", mmap=True, weights_only=False)
+    except (TypeError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"Could not memory-map {src.name} ({exc}). Without mmap the whole 18 GB "
+            "checkpoint must fit in RAM. Switch Colab to a High-RAM runtime "
+            "(Runtime > Change runtime type > High-RAM) and retry."
+        ) from exc
+
     sd = ckpt.get("state_dict", ckpt)
-    half = {k: (v.half() if torch.is_floating_point(v) else v) for k, v in sd.items()}
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": half}, dst)
-    log.info("  -> %s (%s)", dst.name, human_bytes(dst.stat().st_size))
-    return dst
+    limit = int(shard_gb * 1024**3)
+    shards, current, current_bytes, index = [], {}, 0, {}
+
+    def flush():
+        nonlocal current, current_bytes
+        if not current:
+            return
+        name = f"shard_{len(shards):03d}.pt"
+        torch.save(current, shard_dir / name)
+        for key in current:
+            index[key] = name
+        shards.append(name)
+        log.info("  wrote %s (%d tensors, %s)", name, len(current), human_bytes(current_bytes))
+        current, current_bytes = {}, 0
+
+    for key, value in sd.items():
+        if not torch.is_tensor(value):
+            continue
+        tensor = value.half() if torch.is_floating_point(value) else value
+        current[key] = tensor.clone()          # detach from the mmap before it is closed
+        current_bytes += tensor.numel() * tensor.element_size()
+        if current_bytes >= limit:
+            flush()
+    flush()
+    del ckpt, sd
+
+    import json
+
+    index_path.write_text(json.dumps({"shards": shards, "keys": index}))
+    log.info("decoder sharded into %d files -> %s", len(shards), shard_dir)
+    return shard_dir
+
+
+def load_sharded_state_dict(engine, shard_dir: Path) -> None:
+    """Copy sharded weights into an already-constructed engine, one shard at a time."""
+    import json
+
+    import torch
+
+    index = json.loads((Path(shard_dir) / "index.json").read_text())
+    own = dict(engine.state_dict())
+    loaded = missing = 0
+    for name in index["shards"]:
+        shard = torch.load(Path(shard_dir) / name, map_location="cpu", weights_only=False)
+        with torch.no_grad():
+            for key, value in shard.items():
+                target = own.get(key)
+                if target is None:
+                    missing += 1
+                    continue
+                target.copy_(value.to(target.dtype))
+                loaded += 1
+        del shard
+    log.info("decoder weights: %d loaded, %d unmatched", loaded, missing)
 
 
 def build_diffusion_engine(
-    ckpt_path: Path, config_path: Path, device: str = "cuda", num_steps: int = 38
+    ckpt_path: Path, config_path: Path, device: str = "cuda", num_steps: int = 38,
+    sharded: bool = True,
 ):
     from omegaconf import OmegaConf
     from generative_models.sgm.models.diffusion import DiffusionEngine  # type: ignore
@@ -107,12 +177,19 @@ def build_diffusion_engine(
         scale_factor=params["scale_factor"],
         disable_first_stage_autocast=params["disable_first_stage_autocast"],
     )
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    missing, unexpected = engine.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
-    if missing:
-        log.warning("decoder: %d missing keys (e.g. %s)", len(missing), list(missing)[:3])
-    engine = engine.to(device).eval().requires_grad_(False)
-    del ckpt
+    if sharded:
+        # Move the (randomly initialised) engine to the GPU first, then stream weights
+        # in shard by shard: at no point is the full state dict resident in RAM.
+        engine = engine.to(device).eval().requires_grad_(False)
+        load_sharded_state_dict(engine, ckpt_path)
+    else:
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        missing, unexpected = engine.load_state_dict(ckpt.get("state_dict", ckpt),
+                                                     strict=False)
+        if missing:
+            log.warning("decoder: %d missing keys (e.g. %s)", len(missing), list(missing)[:3])
+        engine = engine.to(device).eval().requires_grad_(False)
+        del ckpt
     torch.cuda.empty_cache()
     return engine
 
@@ -197,7 +274,6 @@ def reconstruct_for_run(
     num_steps: int = 38,
     batch_size: int = 4,
     unclip_dir: Path | None = None,
-    slim_decoder: bool = True,
 ) -> Path | None:
     """Decode the first `n_images` predicted embeddings of one run."""
     if decoder == "none":
@@ -219,12 +295,17 @@ def reconstruct_for_run(
     config_path = find_unclip_config(ws["upstream"])
 
     unclip_dir = Path(unclip_dir or "/content/unclip_cache")
-    slim = ws["assets"] / "unclip6_fp16.ckpt" if slim_decoder else None
-    ckpt = download_unclip_checkpoint(unclip_dir, slim_path=slim)
-    if slim_decoder and slim is not None and ckpt != slim:
-        ckpt = slim_unclip_checkpoint(ckpt, slim)
+    shard_dir = ws["assets"] / "unclip6_fp16_shards"
+    if not (shard_dir / "index.json").exists():
+        raw = download_unclip_checkpoint(unclip_dir)
+        shard_unclip_checkpoint(raw, shard_dir)
+        # The 18 GB original is no longer needed; the fp16 shards are ~9 GB total.
+        with contextlib.suppress(OSError):
+            raw.unlink()
+            log.info("removed the raw 18 GB checkpoint after sharding")
 
-    engine = build_diffusion_engine(ckpt, config_path, device=device, num_steps=num_steps)
+    engine = build_diffusion_engine(shard_dir, config_path, device=device,
+                                    num_steps=num_steps, sharded=True)
     suffix = _vector_suffix(engine, device)
     out_path = Path(out_path)
     partial = out_path.with_name(out_path.stem + ".partial.pt")

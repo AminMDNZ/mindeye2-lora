@@ -272,9 +272,10 @@ reconstruction. It is also a coarse discriminator: arms a few percent apart ofte
 identical rows, so read the statistics for the size of any difference.
 
 **SDXL unCLIP decoder** (`--decoder sdxl_unclip`): the paper's decoder, and real
-generation. 18 GB download, needs Stability's `sgm`, ~3-5 s/image. Frozen and identical
-across arms, so it adds no between-arm variance and every statistic works without it.
-Worth it on an A100; skip on a free T4.
+generation. 18 GB download once, then split into fp16 shards (~9 GB) that are reused.
+Roughly 4 s/image. It runs fine on a T4 — the encoder is not loaded during this stage,
+so ~7 GB of VRAM suffices. Frozen and identical across arms, so it adds no between-arm
+variance and every statistic works without it.
 """),
 code("""
 main(["recon", "--config", CONFIG])
