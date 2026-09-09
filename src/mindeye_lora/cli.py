@@ -333,8 +333,16 @@ def cmd_recon(args):
                         decoded = True
                     except Exception as exc:
                         # The 18 GB sgm decoder is the most fragile piece of the project.
-                        # Losing it should cost the qualitative figure, not the whole run.
-                        log.warning("SDXL decoder unavailable for %s (%s)", run_dir.name, exc)
+                        # Losing it should cost the qualitative figure, not the whole run --
+                        # but log the traceback, because a bare message like
+                        # "No data left in file" is impossible to act on.
+                        import traceback
+
+                        log.warning("SDXL decoder unavailable for %s (%s: %s)",
+                                    run_dir.name, type(exc).__name__, exc)
+                        log.debug("decoder traceback:\n%s", traceback.format_exc())
+                        if args.strict_decoder:
+                            raise
 
             if not decoded and cfg.retrieval_fallback:
                 target = run_dir / "retrieval.pt"
@@ -729,6 +737,8 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--num_steps", type=int, default=38)
     rc.add_argument("--unclip_dir", default=None)
     rc.add_argument("--force", action="store_true")
+    rc.add_argument("--strict-decoder", dest="strict_decoder", action="store_true",
+                    help="re-raise decoder errors instead of falling back to retrieval")
     rc.set_defaults(func=cmd_recon)
 
     ev = add("evaluate")
@@ -784,7 +794,7 @@ def main(argv=None):
                           ("reference", "full"), ("frozen_arm", "frozen"),
                           ("equivalence_fraction", 0.2), ("n_boot", 10000),
                           ("tree", False), ("lenient", False), ("skip", None),
-                          ("ignore_memory_check", False)]:
+                          ("ignore_memory_check", False), ("strict_decoder", False)]:
         if not hasattr(args, name):
             setattr(args, name, default)
     args.func(args)

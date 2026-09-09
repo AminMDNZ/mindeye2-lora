@@ -29,24 +29,52 @@ GENERATIVE_MODELS_URL = "https://github.com/Stability-AI/generative-models.git"
 # decoder setup
 # --------------------------------------------------------------------------------------
 def ensure_generative_models(upstream_dir: Path) -> Path:
-    """Make `generative_models` importable, preferring the copy inside MindEyeV2."""
+    """Make both `generative_models.sgm` and bare `sgm` importable.
+
+    Upstream's unclip6.yaml names its targets as `sgm.models.autoencoder.AutoencoderKL`,
+    and `instantiate_from_config` imports that string literally. Putting only
+    `generative_models`'s parent on the path makes `generative_models.sgm` work while
+    bare `sgm` raises ModuleNotFoundError, so the engine fails the moment it tries to
+    build its first stage. Add the package directory itself to `sys.path` as well, and
+    alias the module both ways so either spelling resolves to the same object.
+    """
     candidates = [
         Path(upstream_dir) / "MindEyeV2" / "src" / "generative_models",
         Path(upstream_dir) / "generative-models",
     ]
-    for c in candidates:
-        if c.exists():
-            parent = str(c.parent)
-            if parent not in sys.path:
-                sys.path.insert(0, parent)
-            if c.name == "generative-models" and str(c) not in sys.path:
-                sys.path.insert(0, str(c))
-            return c
-    dest = Path(upstream_dir) / "generative-models"
-    log.info("Cloning Stability generative-models -> %s", dest)
-    subprocess.run(["git", "clone", "--depth", "1", GENERATIVE_MODELS_URL, str(dest)], check=True)
-    sys.path.insert(0, str(dest))
-    return dest
+    package = next((c for c in candidates if c.exists()), None)
+    if package is None:
+        package = Path(upstream_dir) / "generative-models"
+        log.info("Cloning Stability generative-models -> %s", package)
+        subprocess.run(["git", "clone", "--depth", "1", GENERATIVE_MODELS_URL, str(package)],
+                       check=True)
+
+    for entry in (str(package.parent), str(package)):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+
+    # `sgm` lives inside the package directory; importing it top-level now works because
+    # that directory is on the path. Alias so both import spellings share one instance.
+    import importlib
+
+    try:
+        sgm = importlib.import_module("sgm")
+        sys.modules.setdefault("generative_models.sgm", sgm)
+    except ModuleNotFoundError:
+        try:
+            sgm = importlib.import_module("generative_models.sgm")
+            sys.modules["sgm"] = sgm
+            for sub in ("models", "util", "modules"):
+                with contextlib.suppress(Exception):
+                    sys.modules[f"sgm.{sub}"] = importlib.import_module(
+                        f"generative_models.sgm.{sub}")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                f"Neither `sgm` nor `generative_models.sgm` is importable from {package}. "
+                "The decoder cannot be built; use --decoder none."
+            ) from exc
+    log.info("sgm importable from %s", package)
+    return package
 
 
 def find_unclip_config(upstream_dir: Path) -> Path:
@@ -160,8 +188,16 @@ def build_diffusion_engine(
     ckpt_path: Path, config_path: Path, device: str = "cuda", num_steps: int = 38,
     sharded: bool = True,
 ):
+    import importlib
+
     from omegaconf import OmegaConf
-    from generative_models.sgm.models.diffusion import DiffusionEngine  # type: ignore
+
+    # Either spelling works once ensure_generative_models has aliased them.
+    try:
+        DiffusionEngine = importlib.import_module("sgm.models.diffusion").DiffusionEngine
+    except ModuleNotFoundError:
+        DiffusionEngine = importlib.import_module(
+            "generative_models.sgm.models.diffusion").DiffusionEngine
 
     cfg = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     params = cfg["model"]["params"]
@@ -285,7 +321,9 @@ def reconstruct_for_run(
     preds = PredictionStore.load(predictions_path)
     # Slice first, then materialise: the store is a memmap and the full array is ~1.7 GB.
     source = PredictionStore.embedding(preds)
-    emb = torch.from_numpy(np.ascontiguousarray(source[:n_images])).float()
+    # np.array(...) rather than ascontiguousarray: the memmap slice is read-only and
+    # torch.from_numpy warns loudly about non-writable buffers.
+    emb = torch.from_numpy(np.array(source[:n_images], dtype=np.float32))
     rows = torch.from_numpy(np.asarray(preds["rows"][:n_images]))
 
     from .upstream import load_upstream
