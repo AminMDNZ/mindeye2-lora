@@ -23,6 +23,7 @@ from typing import Sequence
 import numpy as np
 from scipy import stats as sps
 
+from .metric_meta import REDUNDANT_METRICS
 from .utils import log, progress
 
 
@@ -262,6 +263,16 @@ def compare_against_reference(
     higher_is_better = higher_is_better or {}
     ref = per_arm[reference]
     metrics = list(metrics or ref.keys())
+
+    # Drop metrics that are algebraically the same as one already present. Reporting
+    # both makes a single result look like two independent confirmations.
+    dropped = [m for m in metrics
+               if m in REDUNDANT_METRICS and REDUNDANT_METRICS[m] in metrics]
+    if dropped:
+        log.info("omitting %s: identical to %s", ", ".join(dropped),
+                 ", ".join(REDUNDANT_METRICS[m] for m in dropped))
+        metrics = [m for m in metrics if m not in dropped]
+
     results: list[Comparison] = []
 
     bar = progress(total=len(metrics), desc="paired statistics", unit="metric")

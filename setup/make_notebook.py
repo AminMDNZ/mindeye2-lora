@@ -319,11 +319,14 @@ main(["report", "--config", CONFIG])
 """),
 
 code("""
-from IPython.display import Markdown, display
+from IPython.display import HTML, display
 from pathlib import Path
 
-report = Path(os.environ["MINDEYE_LORA_ROOT"]) / "results/reports/REPORT.md"
-display(Markdown(report.read_text()))
+# The HTML twin embeds its figures, so it renders correctly here. The markdown
+# version links relative paths, which a notebook resolves against its own working
+# directory rather than the report's folder -- hence blank images.
+report = Path(os.environ["MINDEYE_LORA_ROOT"]) / "results/reports/REPORT.html"
+display(HTML(report.read_text()))
 """),
 
 code("""

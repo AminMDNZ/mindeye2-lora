@@ -40,13 +40,27 @@ def _mpl():
 # --------------------------------------------------------------------------------------
 # figures
 # --------------------------------------------------------------------------------------
+# Metrics with a known chance level, used to frame the axis honestly when zooming in.
+CHANCE_LEVEL = {"two_way_clip": 0.5, "retrieval_percentile": 0.5, "cosine": 0.0}
+
+
 def figure_metric_bars(per_arm: dict[str, dict[str, np.ndarray]], metrics: Sequence[str],
                        out: Path) -> Path:
+    """Per-arm means with 95% CIs.
+
+    The y-axis is zoomed to the data rather than anchored at zero. Anchoring at zero is
+    the usual advice for bar charts, but here the arms differ by ~0.02 on a metric whose
+    floor is chance (0.5), so a 0-1 axis renders three visually identical bars and hides
+    the entire result. To keep that honest the axis is broken explicitly: bars start at
+    the zoom floor, and a caption states the chance level so nobody reads bar height as
+    proportional to performance.
+    """
     plt = _mpl()
     arms = _order(list(per_arm))
     metrics = [m for m in metrics if any(m in per_arm[a] for a in arms)]
-    fig, axes = plt.subplots(1, len(metrics), figsize=(3.1 * len(metrics), 3.2))
+    fig, axes = plt.subplots(1, len(metrics), figsize=(3.3 * len(metrics), 3.4))
     axes = np.atleast_1d(axes)
+
     for ax, metric in zip(axes, metrics):
         means, errs, labels = [], [], []
         for a in arms:
@@ -56,120 +70,34 @@ def figure_metric_bars(per_arm: dict[str, dict[str, np.ndarray]], metrics: Seque
             means.append(v.mean())
             errs.append(1.96 * v.std(ddof=1) / np.sqrt(len(v)))
             labels.append(a)
+        if not means:
+            continue
         colors = ["#b0b0b0" if l == "frozen" else "#2f6fb2" if l.startswith("lora")
                   else "#c1440e" if l == "full" else "#7a9e5e" for l in labels]
-        ax.bar(range(len(means)), means, yerr=errs, capsize=3, color=colors)
+
+        lo = min(m - e for m, e in zip(means, errs))
+        hi = max(m + e for m, e in zip(means, errs))
+        span = max(hi - lo, 1e-9)
+        floor, ceil = lo - 0.6 * span, hi + 0.3 * span
+        chance = CHANCE_LEVEL.get(metric)
+        if chance is not None and chance > floor:
+            floor = min(floor, chance - 0.1 * span)   # keep chance visible if it is close
+
+        ax.bar(range(len(means)), [m - floor for m in means], bottom=floor,
+               yerr=errs, capsize=3, color=colors)
+        if chance is not None and floor < chance < ceil:
+            ax.axhline(chance, color="#555", ls="--", lw=1)
+            ax.text(len(means) - 0.5, chance, " chance", va="bottom", ha="right",
+                    fontsize=7, color="#555")
+        ax.set_ylim(floor, ceil)
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.set_title(metric + ("  ↑" if HIGHER_IS_BETTER.get(metric, True) else "  ↓"))
-    fig.suptitle("Per-image mean ± 95% CI on the held-out NSD test images", y=1.03)
-    fig.savefig(out)
-    plt.close(fig)
-    return out
 
-
-def figure_forest(comparisons: list[dict], out: Path, metric_filter: Sequence[str] | None = None) -> Path:
-    """Paired difference vs the full fine-tune, with bootstrap CIs."""
-    plt = _mpl()
-    rows = [c for c in comparisons if not metric_filter or c["metric"] in metric_filter]
-    if not rows:
-        return out
-    metrics = sorted({r["metric"] for r in rows})
-    fig, axes = plt.subplots(1, len(metrics), figsize=(3.2 * len(metrics), 0.5 * len(rows) / len(metrics) + 2.2))
-    axes = np.atleast_1d(axes)
-    for ax, metric in zip(axes, metrics):
-        sub = [r for r in rows if r["metric"] == metric]
-        sub = sorted(sub, key=lambda r: _order([x["arm"] for x in sub]).index(r["arm"]))
-        y = np.arange(len(sub))
-        centers = [r["diff"] for r in sub]
-        lo = [r["diff"] - r["ci_low"] for r in sub]
-        hi = [r["ci_high"] - r["diff"] for r in sub]
-        ax.errorbar(centers, y, xerr=[lo, hi], fmt="o", color="#2f6fb2", capsize=3)
-        ax.axvline(0, color="#c1440e", lw=1)
-        margin = next((r["tost_margin"] for r in sub if np.isfinite(r.get("tost_margin", np.nan))), None)
-        if margin:
-            ax.axvspan(-margin, margin, color="#7a9e5e", alpha=0.12,
-                       label="equivalence zone")
-            ax.legend(loc="lower right", fontsize=7)
-        ax.set_yticks(y)
-        ax.set_yticklabels([r["arm"] for r in sub])
-        ax.set_xlabel(f"Δ {metric} vs full fine-tune")
-    fig.suptitle("Paired differences (negative = worse than full fine-tuning)", y=1.02)
-    fig.savefig(out)
-    plt.close(fig)
-    return out
-
-
-def figure_pareto(efficiency: list[dict], per_arm: dict[str, dict[str, np.ndarray]],
-                  metric: str, out: Path) -> Path:
-    """Trainable parameters against quality — the actual decision surface."""
-    plt = _mpl()
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
-    for row in efficiency:
-        arm = row["arm"]
-        if arm not in per_arm or metric not in per_arm[arm]:
-            continue
-        x = max(row["trainable_params"], 1)
-        y = float(np.mean(per_arm[arm][metric]))
-        color = "#b0b0b0" if arm == "frozen" else "#c1440e" if arm == "full" else "#2f6fb2"
-        ax.scatter(x, y, s=48, color=color, zorder=3)
-        ax.annotate(arm, (x, y), textcoords="offset points", xytext=(6, 3), fontsize=8)
-    ax.set_xscale("log")
-    ax.set_xlabel("trainable parameters (log scale)")
-    ax.set_ylabel(metric)
-    ax.set_title("Cost / quality trade-off")
-    fig.savefig(out)
-    plt.close(fig)
-    return out
-
-
-def figure_training_curves(run_dirs: dict[str, Path], out: Path, key: str = "loss") -> Path:
-    plt = _mpl()
-    fig, ax = plt.subplots(figsize=(5.0, 3.4))
-    for arm, d in run_dirs.items():
-        path = Path(d) / "train_log.csv"
-        if not path.exists():
-            continue
-        with path.open() as fh:
-            rows = list(csv.DictReader(fh))
-        xs = [float(r["epoch"]) for r in rows if r.get(key)]
-        ys = [float(r[key]) for r in rows if r.get(key)]
-        if xs:
-            ax.plot(xs, ys, label=arm, lw=1.4)
-    ax.set_xlabel("epoch")
-    ax.set_ylabel(key)
-    ax.set_title(f"Training {key}")
-    ax.legend(fontsize=8)
-    fig.savefig(out)
-    plt.close(fig)
-    return out
-
-
-def figure_qualitative(
-    ground_truth, recons_by_arm: dict[str, "np.ndarray"], out: Path, n: int = 8
-) -> Path:
-    """Ground truth on top, one row per adaptation strategy underneath."""
-    plt = _mpl()
-    arms = _order(list(recons_by_arm))
-    n = min(n, len(ground_truth))
-    rows = 1 + len(arms)
-    fig, axes = plt.subplots(rows, n, figsize=(1.35 * n, 1.45 * rows))
-    axes = np.atleast_2d(axes)
-    for j in range(n):
-        axes[0, j].imshow(np.transpose(np.asarray(ground_truth[j]), (1, 2, 0)).clip(0, 1))
-        axes[0, j].axis("off")
-    axes[0, 0].set_ylabel("ground truth")
-    for i, arm in enumerate(arms, start=1):
-        imgs = recons_by_arm[arm]
-        for j in range(n):
-            axes[i, j].axis("off")
-            if j < len(imgs):
-                axes[i, j].imshow(np.transpose(np.asarray(imgs[j]), (1, 2, 0)).clip(0, 1))
-    for i, label in enumerate(["ground truth"] + arms):
-        axes[i, 0].axis("on")
-        axes[i, 0].set_xticks([])
-        axes[i, 0].set_yticks([])
-        axes[i, 0].set_ylabel(label, rotation=0, ha="right", va="center", fontsize=8)
+    fig.suptitle("Per-image mean ± 95% CI on the held-out NSD test images\n"
+                 "y-axis is zoomed to the data — bar height is not proportional to score",
+                 y=1.02, fontsize=9)
+    fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
     return out
@@ -297,6 +225,24 @@ def _fmt(x, nd: int = 4) -> str:
     return str(x)
 
 
+def _embed_png(path: Path) -> str | None:
+    """Inline a PNG as a base64 data URI.
+
+    Relative image links only resolve if the viewer's working directory happens to be
+    the report's folder — which is not the case for `display(Markdown(...))` in a
+    notebook, nor for the file viewed from anywhere else. Embedding makes REPORT.md
+    self-contained and portable at the cost of ~33% size overhead.
+    """
+    import base64
+
+    try:
+        data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    except Exception as exc:  # pragma: no cover
+        log.warning("could not embed %s (%s)", path, exc)
+        return None
+    return f"data:image/png;base64,{data}"
+
+
 def build_report(
     out_path: Path,
     cfg_summary: dict,
@@ -307,6 +253,7 @@ def build_report(
     seed_rows: list[dict],
     figures: dict[str, Path],
     primary_metric: str = "two_way_clip",
+    embed_figures: bool = True,
 ) -> Path:
     arms = _order(list(per_arm))
     metrics = [m for m in ALL_METRICS if any(m in per_arm[a] for a in arms)]
@@ -402,7 +349,8 @@ def build_report(
         for name, path in figures.items():
             if not path or not Path(path).exists():
                 continue
-            lines.append(f"### {name}\n\n![{name}]({Path(path).name})\n")
+            src = _embed_png(path) if embed_figures else Path(path).name
+            lines.append(f"### {name}\n\n![{name}]({src or Path(path).name})\n")
             if "Retrieval" in name:
                 lines += [
                     "> **These images were retrieved, not generated.** Each panel is the "
@@ -433,6 +381,66 @@ def build_report(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines))
+    markdown = "\n".join(lines)
+    out_path.write_text(markdown)
     log.info("report written -> %s", out_path)
+
+    # A self-contained HTML twin: opens in any browser straight off Drive, with the
+    # tables and embedded figures intact, and needs no markdown renderer.
+    try:
+        html_path = out_path.with_suffix(".html")
+        html_path.write_text(_markdown_to_html(markdown))
+        log.info("html report  -> %s", html_path)
+    except Exception as exc:  # pragma: no cover
+        log.warning("could not write HTML report (%s)", exc)
     return out_path
+
+
+def _markdown_to_html(md: str) -> str:
+    """Minimal markdown -> HTML. Handles what build_report actually emits: headings,
+    tables, images, blockquotes, bullets and paragraphs. No dependency required."""
+    import html as _html
+    import re
+
+    out, in_table = [], False
+    for raw in md.split("\n"):
+        line = raw.rstrip()
+        img = re.match(r"!\[(.*?)\]\((.*?)\)$", line.strip())
+        if img:
+            if in_table:
+                out.append("</table>"); in_table = False
+            out.append(f'<img alt="{_html.escape(img.group(1))}" src="{img.group(2)}">')
+            continue
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if all(set(c) <= set("-: ") for c in cells) and in_table:
+                continue                       # separator row
+            tag = "th" if not in_table else "td"
+            if not in_table:
+                out.append("<table>"); in_table = True
+            row = "".join(f"<{tag}>{_html.escape(c)}</{tag}>" for c in cells)
+            out.append(f"<tr>{row}</tr>")
+            continue
+        if in_table:
+            out.append("</table>"); in_table = False
+        if line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            out.append(f"<h{level}>{_html.escape(line.lstrip('# ').strip())}</h{level}>")
+        elif line.startswith(">"):
+            out.append(f"<blockquote>{_html.escape(line.lstrip('> '))}</blockquote>")
+        elif line.startswith("- "):
+            out.append(f"<li>{_html.escape(line[2:])}</li>")
+        elif line.strip():
+            out.append(f"<p>{_html.escape(line)}</p>")
+    if in_table:
+        out.append("</table>")
+    style = (
+        "body{font-family:system-ui,-apple-system,sans-serif;max-width:1000px;"
+        "margin:2rem auto;padding:0 1rem;line-height:1.5;color:#222}"
+        "table{border-collapse:collapse;margin:1rem 0;font-size:.9rem}"
+        "th,td{border:1px solid #ddd;padding:.35rem .6rem;text-align:left}"
+        "th{background:#f5f5f5}img{max-width:100%;margin:1rem 0}"
+        "blockquote{border-left:3px solid #ccc;margin:1rem 0;padding:.2rem 1rem;color:#555}"
+        "h1,h2,h3{margin-top:1.6rem}"
+    )
+    return f"<!doctype html><meta charset='utf-8'><style>{style}</style>\n" + "\n".join(out)

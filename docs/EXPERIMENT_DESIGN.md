@@ -75,7 +75,14 @@ thing any arm modifies:
 
 - `cosine` — similarity between predicted and true CLIP token embeddings
 - `two_way_clip` — per-image probability the true image outranks a random distractor
-- `retrieval_percentile` — rank of the correct image among all test images
+
+An earlier version also reported `retrieval_percentile` (the rank of the correct image
+among all test images). It is **algebraically identical** to `two_way_clip`: both equal
+the fraction of distractors the true target outranks, and they agree to floating-point
+precision on every sample. Reporting both made a single result look like two independent
+confirmations, so the default metric set now excludes it and `compare_against_reference`
+drops it if present. The lesson generalises: check that your metrics are actually
+measuring different things before treating their agreement as evidence.
 
 **Secondary (needs reconstructions).** The eight metrics from MindEye1/2: PixCorr, SSIM,
 AlexNet-2, AlexNet-5, Inception, CLIP, EffNet-B, SwAV. Two-way metrics use the published

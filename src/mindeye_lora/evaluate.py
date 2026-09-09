@@ -285,7 +285,12 @@ def two_way_identification(pred, target, chunk: int = 256) -> np.ndarray:
 
 
 def retrieval_percentile(pred, target) -> np.ndarray:
-    """1.0 means the correct image was ranked first among all test images."""
+    """1.0 means the correct image was ranked first among all test images.
+
+    Note this is algebraically identical to `two_way_identification`: both equal the
+    fraction of distractors that the true target outranks. Kept for the rank-oriented
+    framing, but excluded from the default metric set to avoid double-counting.
+    """
     p, t = _flat_norm(pred), _flat_norm(target)
     sim = p @ t.T
     n = sim.shape[0]
@@ -297,12 +302,20 @@ def cosine_per_sample(pred, target) -> np.ndarray:
     return (_flat_norm(pred) * _flat_norm(target)).sum(-1).numpy()
 
 
-def embedding_metrics(pred, target) -> dict[str, np.ndarray]:
-    return {
+def embedding_metrics(pred, target, include_redundant: bool = False) -> dict[str, np.ndarray]:
+    """Per-image CLIP-space metrics.
+
+    `retrieval_percentile` is excluded by default: it is the same quantity as
+    `two_way_clip` (both count the fraction of distractors the true target outranks),
+    so including it duplicates a column and makes two metrics look like three.
+    """
+    out = {
         "cosine": cosine_per_sample(pred, target),
         "two_way_clip": two_way_identification(pred, target),
-        "retrieval_percentile": retrieval_percentile(pred, target),
     }
+    if include_redundant:
+        out["retrieval_percentile"] = retrieval_percentile(pred, target)
+    return out
 
 
 def retrieval_summary(pred, target, pool: int = 300, seed: int = 0) -> dict:

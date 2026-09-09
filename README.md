@@ -161,7 +161,9 @@ outcome measures live in CLIP embedding space, which is the only thing LoRA touc
 
 - `cosine` — similarity between predicted and true CLIP token embeddings
 - `two_way_clip` — per-image probability the true image outranks a random distractor
-- `retrieval_percentile` — rank of the correct image among all 1,000 test images
+
+(`retrieval_percentile` exists but is excluded by default: it is algebraically the same
+quantity as `two_way_clip`, so reporting both would double-count one result.)
 
 With reconstructions you additionally get the eight metrics from the MindEye papers
 (PixCorr, SSIM, AlexNet-2/5, Inception, CLIP, EffNet-B, SwAV). Note these are computed
