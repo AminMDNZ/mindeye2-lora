@@ -1,0 +1,75 @@
+# Paper-scale variant: the hidden_dim=4096 shared-subject checkpoint (~2.1B parameters).
+# Needs an A100-class runtime (Colab Pro) and ~40 GB of workspace. On a T4, or on the
+# L4/V100 you may be assigned instead, this will OOM — use configs/colab_t4.yaml.
+#
+# This is also the configuration where LoRA matters most: the full fine-tune updates
+# roughly an order of magnitude more parameters than in the 1024-hidden setup, so the
+# checkpoint-size and memory savings from adapters are correspondingly larger.
+
+subj: 1
+num_sessions: 1
+pretrain: multisubject_4096
+# The low-level (blurry reconstruction) branch is OFF on purpose. train.py optimises
+# only the prior + CLIP losses, so enabling it would load blur parameters that receive
+# no gradient, inflating the full arm's trainable-parameter count without training them.
+# Turning it on requires adding the low-level loss and downloading the SD VAE.
+blurry_recon: false
+use_prior: true
+
+epochs: 150
+# 4096-hidden activations are ~4x the 1024 config; check the preflight estimate and
+# raise batch_size (lowering grad_accum to match) if the A100 has room.
+batch_size: 8
+grad_accum: 3
+lr: 3.0e-4
+precision: bf16
+# At hidden_dim=4096 the model is ~2.1B params and full fine-tuning is optimiser-state
+# bound: fp32 AdamW needs ~34 GB, which will not fit a 40GB A100. 8-bit moments bring
+# that to ~21 GB. This applies to EVERY arm — using it for only the full arm would
+# confound the comparison with an optimiser change.
+optimizer: adamw8bit
+num_workers: 4
+seeds: [0, 1, 2]
+eval_every: 10
+time_budget_min: 300
+
+recon_decoder: sdxl_unclip
+recon_n_images: 200
+qualitative_n: 8
+qualitative_arms: 3
+retrieval_fallback: true
+retrieval_k: 3
+
+arms:
+  - name: frozen
+    mode: frozen
+    label: "Frozen shared model"
+  - name: lora_r16
+    mode: lora
+    lora_r: 16
+    lora_alpha: 32
+    lr: 1.0e-3
+    label: "LoRA r=16"
+  - name: lora_r64
+    mode: lora
+    lora_r: 64
+    lora_alpha: 128
+    lr: 1.0e-3
+    label: "LoRA r=64"
+  - name: lora_r16_backbone_only
+    mode: lora
+    lora_r: 16
+    lora_alpha: 32
+    lr: 1.0e-3
+    lora_targets: ["^backbone\\."]
+    label: "LoRA r=16 (backbone only, prior frozen)"
+  - name: lora_r16_prior_only
+    mode: lora
+    lora_r: 16
+    lora_alpha: 32
+    lr: 1.0e-3
+    lora_targets: ["^diffusion_prior\\."]
+    label: "LoRA r=16 (prior only, backbone frozen)"
+  - name: full
+    mode: full
+    label: "Full fine-tune (paper recipe)"
