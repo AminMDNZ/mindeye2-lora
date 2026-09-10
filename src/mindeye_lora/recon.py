@@ -74,7 +74,63 @@ def ensure_generative_models(upstream_dir: Path) -> Path:
                 "The decoder cannot be built; use --decoder none."
             ) from exc
     log.info("sgm importable from %s", package)
+    patch_xformers_shim()
     return package
+
+
+def patch_xformers_shim() -> bool:
+    """Provide an `xformers` stand-in backed by PyTorch's native attention.
+
+    sgm's VAE builds a `MemoryEfficientAttnBlock` when the config asks for
+    `vanilla-xformers`, and that block calls `xformers.ops.memory_efficient_attention`
+    unconditionally — the "no module 'xformers'. Processing without..." warning only
+    covers the paths that check the flag, so decoding still dies with
+    `NameError: name 'xformers' is not defined`.
+
+    Installing real xformers would mean matching a build to torch 2.11, which is fragile
+    on Colab. `F.scaled_dot_product_attention` computes exactly the same thing and is
+    itself memory-efficient on PyTorch >= 2.0, so we register a shim module and bind it
+    into the sgm modules that reference the bare name.
+
+    Returns True if a shim was installed, False if real xformers was already present.
+    """
+    import importlib
+    from types import ModuleType
+
+    try:
+        importlib.import_module("xformers")
+        return False
+    except ImportError:
+        pass
+
+    def memory_efficient_attention(query, key, value, attn_bias=None, op=None, **kwargs):
+        # sgm passes (B, L, C) tensors; SDPA accepts that shape directly.
+        return torch.nn.functional.scaled_dot_product_attention(
+            query, key, value, attn_mask=attn_bias
+        )
+
+    xformers = ModuleType("xformers")
+    ops = ModuleType("xformers.ops")
+    ops.memory_efficient_attention = memory_efficient_attention
+    ops.MemoryEfficientAttentionFlashAttentionOp = None
+    xformers.ops = ops
+    sys.modules.setdefault("xformers", xformers)
+    sys.modules.setdefault("xformers.ops", ops)
+
+    # `import xformers` inside a try/except leaves the module-level name unbound, so
+    # registering in sys.modules is not enough — bind the name in each module that uses it.
+    bound = 0
+    for name in ("sgm.modules.diffusionmodules.model", "sgm.modules.attention",
+                 "generative_models.sgm.modules.diffusionmodules.model",
+                 "generative_models.sgm.modules.attention"):
+        module = sys.modules.get(name)
+        if module is not None:
+            module.xformers = xformers
+            if hasattr(module, "XFORMERS_IS_AVAILABLE"):
+                module.XFORMERS_IS_AVAILABLE = True
+            bound += 1
+    log.info("xformers shim installed (PyTorch SDPA) and bound into %d sgm module(s)", bound)
+    return True
 
 
 def find_unclip_config(upstream_dir: Path) -> Path:
