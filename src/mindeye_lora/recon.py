@@ -109,11 +109,34 @@ def patch_xformers_shim() -> bool:
             query, key, value, attn_mask=attn_bias
         )
 
-    xformers = ModuleType("xformers")
-    ops = ModuleType("xformers.ops")
+    class _PermissiveModule(ModuleType):
+        """A module whose unknown attributes resolve to None rather than raising.
+
+        sgm reads a handful of xformers attributes, and the exact set varies with the
+        vendored revision. Discovering them one AttributeError per run — each costing a
+        full engine rebuild — is not a good use of anyone's time, so anything not
+        explicitly provided returns None, which is what the optional `op=` arguments
+        expect anyway.
+        """
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            log.debug("xformers shim: returning None for unrequested attribute %r", name)
+            return None
+
+    xformers = _PermissiveModule("xformers")
+    ops = _PermissiveModule("xformers.ops")
     ops.memory_efficient_attention = memory_efficient_attention
     ops.MemoryEfficientAttentionFlashAttentionOp = None
+    ops.AttentionOp = None
+    ops.unbind = torch.unbind
     xformers.ops = ops
+    # sgm gates a workaround on `version.parse(xformers.__version__) >= 0.0.21`, so the
+    # attribute must exist. Claim a recent version: the workaround it guards is for an
+    # old xformers bug that PyTorch's SDPA does not have.
+    xformers.__version__ = "0.0.29"
+    xformers.info = ModuleType("xformers.info")
     sys.modules.setdefault("xformers", xformers)
     sys.modules.setdefault("xformers.ops", ops)
 
