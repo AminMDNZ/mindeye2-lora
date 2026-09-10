@@ -52,24 +52,34 @@ DALLE2_SUPPORT_REQS = [
 # Upstream's models.py imports utils.py, which imports the vendored `generative_models`
 # (sgm) at module level -- so these are needed even when no image decoder is used.
 UPSTREAM_IMPORT_REQS = [
+    "open-clip-torch",     # sgm.modules.encoders.modules imports open_clip directly
     "pytorch-lightning",
     "lightning-utilities",
     "torchmetrics",
     "omegaconf",
     "diffusers",
     "transformers",
+    "kornia",
 ]
 
-# import name -> pip package, where the two differ
+# Import name -> pip package, wherever the two differ. Guessing by replacing "_" with
+# "-" is right often enough to be tempting and wrong often enough to be dangerous:
+# `open_clip` lives in `open-clip-torch`, not `open-clip` (which is an unrelated
+# package), so the guess installs the wrong thing and the import still fails.
 IMPORT_TO_PKG = {
+    "open_clip": "open-clip-torch",
     "pytorch_lightning": "pytorch-lightning", "lightning_utilities": "lightning-utilities",
+    "lightning_fabric": "pytorch-lightning", "torchmetrics": "torchmetrics",
     "pytorch_warmup": "pytorch-warmup", "embedding_reader": "embedding-reader",
     "ema_pytorch": "ema-pytorch", "einops_exts": "einops-exts",
     "rotary_embedding_torch": "rotary-embedding-torch", "x_clip": "x-clip",
     "coca_pytorch": "coca-pytorch", "clip": "clip-anytorch",
     "resize_right": "resize-right", "vector_quantize_pytorch": "vector-quantize-pytorch",
+    "dalle2_pytorch": "dalle2-pytorch", "taming": "taming-transformers-rom1504",
     "PIL": "pillow", "sklearn": "scikit-learn", "skimage": "scikit-image",
-    "yaml": "pyyaml", "cv2": "opencv-python-headless",
+    "yaml": "pyyaml", "cv2": "opencv-python-headless", "omegaconf": "omegaconf",
+    "safetensors": "safetensors", "transformers": "transformers",
+    "huggingface_hub": "huggingface-hub", "kornia": "kornia",
 }
 
 
@@ -110,7 +120,8 @@ def preinstall_upstream_reqs() -> None:
     `import_with_autoinstall` mop up whatever is left.
     """
     module_for = {"pytorch-lightning": "pytorch_lightning",
-                  "lightning-utilities": "lightning_utilities"}
+                  "lightning-utilities": "lightning_utilities",
+                  "open-clip-torch": "open_clip"}
     missing = []
     for pkg in UPSTREAM_IMPORT_REQS:
         mod = module_for.get(pkg, pkg.replace("-", "_"))
@@ -195,9 +206,11 @@ def import_with_autoinstall(module: str, max_installs: int = 25) -> ModuleType:
                 raise
             if name in seen:
                 raise ModuleNotFoundError(
-                    f"'{name}' is still missing after installing it. This is a renamed "
-                    f"or relocated module, not an absent package, and needs an explicit "
-                    f"alias (see patch_diffusers_vae for the pattern).",
+                    f"'{name}' is still missing after installing {pkg!r}. Either the "
+                    f"import name maps to a differently-named package (add it to "
+                    f"IMPORT_TO_PKG in upstream.py), or the module was relocated and "
+                    f"needs an alias (see patch_diffusers_vae for that pattern). "
+                    f"Running `bash setup/colab_setup.sh` installs the known set.",
                     name=name,
                 ) from exc
             seen.add(name)

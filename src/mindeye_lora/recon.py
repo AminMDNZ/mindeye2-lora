@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from .assets import UNCLIP_CKPT, hf_download
-from .utils import human_bytes, log, progress, robust_load, robust_save
+from .utils import eta_string, human_bytes, log, progress, robust_load, robust_save
 
 GENERATIVE_MODELS_URL = "https://github.com/Stability-AI/generative-models.git"
 
@@ -170,6 +170,8 @@ def load_sharded_state_dict(engine, shard_dir: Path) -> None:
     index = json.loads((Path(shard_dir) / "index.json").read_text())
     own = dict(engine.state_dict())
     loaded = missing = skipped_embedder = 0
+    bar = progress(total=len(index["shards"]), desc="loading decoder weights",
+                   unit="shard", leave=False)
     for name in index["shards"]:
         shard = torch.load(Path(shard_dir) / name, map_location="cpu", weights_only=False)
         with torch.no_grad():
@@ -190,6 +192,8 @@ def load_sharded_state_dict(engine, shard_dir: Path) -> None:
                 target.copy_(value.to(device=target.device, dtype=target.dtype))
                 loaded += 1
         del shard
+        bar.update(1)
+    bar.close()
     log.info("decoder weights: %d loaded, %d unmatched, %d skipped (dropped embedder)",
              loaded, missing, skipped_embedder)
     if missing:
@@ -326,6 +330,7 @@ def unclip_reconstruct(
     batch_size: int = 4,
     upstream_utils=None,
     checkpoint_path=None,
+    desc: str = "decode",
 ) -> torch.Tensor:
     """Decode [N, 256, 1664] CLIP token embeddings into [N, 3, H, W] images in [0, 1].
 
@@ -348,7 +353,10 @@ def unclip_reconstruct(
                 start_at = int(part["done"])
                 log.info("resuming decode from image %d/%d", start_at, len(clip_embeddings))
 
-        bar = progress(total=len(clip_embeddings), desc="decode", unit="img")
+        import time
+
+        t0 = time.time()
+        bar = progress(total=len(clip_embeddings), desc=desc, unit="img")
         if start_at:
             bar.update(start_at)
         for start in range(start_at, len(clip_embeddings), batch_size):
@@ -369,7 +377,16 @@ def unclip_reconstruct(
             outs.append(samples.float().cpu())
             done = min(start + batch_size, len(clip_embeddings))
             bar.update(done - start)
-            if checkpoint_path is not None and (start // batch_size) % 3 == 0:
+            if hasattr(bar, "set_postfix_str"):
+                bar.set_postfix_str(eta_string(done - start_at,
+                                               len(clip_embeddings) - start_at,
+                                               time.time() - t0))
+            # Every batch for short runs, every third for long ones: decoding is ~4 s an
+            # image, so a lost batch is cheap, but writing a growing tensor every time
+            # would dominate a 200-image arm.
+            checkpoint_now = (len(clip_embeddings) <= 32
+                              or (start // batch_size) % 3 == 0)
+            if checkpoint_path is not None and checkpoint_now:
                 try:
                     robust_save({"images": torch.cat(outs), "done": done}, checkpoint_path)
                 except IOError as exc:
@@ -455,7 +472,8 @@ def reconstruct_for_run(
     out_path = Path(out_path)
     partial = out_path.with_name(out_path.stem + ".partial.pt")
     images = unclip_reconstruct(engine, emb, suffix, device=device, batch_size=batch_size,
-                                upstream_utils=up.utils, checkpoint_path=partial)
+                                upstream_utils=up.utils, checkpoint_path=partial,
+                                desc=f"decode {Path(predictions_path).parent.name}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     robust_save({"recons": images, "rows": rows}, out_path)

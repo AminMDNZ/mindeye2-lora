@@ -308,10 +308,13 @@ def cmd_recon(args):
     decoder = args.decoder or cfg.recon_decoder
     n_images = args.n_images or cfg.recon_n_images
     seeds = [int(s) for s in (args.seed or [cfg.recon_seed])]
+    recon_arms = _selected_arms(cfg, args.arm)
+    tracker = RunTracker(len(seeds) * len(recon_arms), label="recon runs")
 
     for seed in seeds:
-        for arm in _selected_arms(cfg, args.arm):
+        for arm in recon_arms:
             run_dir = ws.run_dir(cfg.run_name(arm.name, seed))
+            tracker.start(run_dir.name)
             store_dir = run_dir / "predictions"
             if not PredictionStore.is_complete(store_dir):
                 log.warning("no predictions for %s — run `predict` first.", run_dir.name)
@@ -348,9 +351,14 @@ def cmd_recon(args):
                 target = run_dir / "retrieval.pt"
                 if target.exists() and not args.force:
                     log.info("retrieval output exists for %s", run_dir.name)
+                    tracker.finish(run_dir.name, skipped=True)
                     continue
                 build_retrieval_output(store_dir, target, k=cfg.retrieval_k,
                                        n_items=n_images)
+                tracker.finish(run_dir.name)
+            elif decoded:
+                tracker.finish(run_dir.name)
+    log.info("── %s ──", tracker.summary())
 
 
 def cmd_evaluate(args):
