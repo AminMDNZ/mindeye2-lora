@@ -158,8 +158,12 @@ The SDXL unCLIP decoder is a separate 18 GB download; see below.
   12 GB Colab VM outright. Sharding reads the source with `mmap=True`, casts tensor by
   tensor, and streams shards into a GPU-resident engine, so peak RAM is about one shard.
 - Needs Stability's `sgm` package, which ships inside the MindEyeV2 clone.
-- Roughly 4 s/image on a T4; the encoder is not loaded during this stage, so ~7 GB of
-  VRAM is enough.
+- Roughly 11 s/image on a T4 at 38 diffusion steps. The encoder is not loaded during
+  this stage, and the 1.9B-parameter CLIP image embedder is dropped from the conditioner
+  (the embedding is supplied directly), so the decoder needs about 5 GB of VRAM.
+- xformers is not required: a shim routes sgm's `memory_efficient_attention` to
+  PyTorch's native SDPA, which computes the same thing without needing a build matched
+  to your torch version.
 
 **Every statistic in this project works with `--decoder none.`** The decoder is frozen
 and identical across arms, so it contributes no between-arm variance. The primary

@@ -406,16 +406,20 @@ def unclip_reconstruct(
     clip_embeddings: torch.Tensor,
     vector_suffix: torch.Tensor,
     device: str = "cuda",
-    batch_size: int = 4,
+    batch_size: int = 1,   # retained for API compatibility; decoding is one at a time
     upstream_utils=None,
     checkpoint_path=None,
     desc: str = "decode",
 ) -> torch.Tensor:
     """Decode [N, 256, 1664] CLIP token embeddings into [N, 3, H, W] images in [0, 1].
 
-    Diffusion decoding runs at 3-5 s/image, so a 200-image arm is a 15-minute stage.
-    Results are checkpointed every few batches and resumed, because re-decoding from
-    scratch after a disconnect is the most expensive restart in the pipeline.
+    Diffusion decoding runs at ~11 s/image on a T4, so a 200-image arm is a 35-minute
+    stage. Results are checkpointed as they are produced and resumed, because
+    re-decoding from scratch after a disconnect is the most expensive restart here.
+
+    `batch_size` is accepted but ignored: upstream's `unclip_recon` decodes a single
+    embedding per call, so batching it produced one image per batch and silently dropped
+    the rest.
     """
     if upstream_utils is not None and hasattr(upstream_utils, "unclip_recon"):
         outs, start_at = [], 0
@@ -423,8 +427,13 @@ def unclip_reconstruct(
             def _validate(part):
                 if "images" not in part or "done" not in part:
                     raise ValueError("missing keys")
+                # `done` counts embeddings consumed and each yields exactly one image,
+                # so the two must match. A mismatch means a checkpoint written by the
+                # old batched loop, which decoded fewer images than it claimed.
                 if int(part["done"]) != int(part["images"].shape[0]):
-                    raise ValueError("count disagrees with tensor length")
+                    raise ValueError(
+                        f"checkpoint claims {int(part['done'])} decoded but holds "
+                        f"{int(part['images'].shape[0])} images")
 
             part = robust_load(checkpoint_path, validate=_validate)
             if part is not None:
@@ -438,40 +447,54 @@ def unclip_reconstruct(
         bar = progress(total=len(clip_embeddings), desc=desc, unit="img")
         if start_at:
             bar.update(start_at)
-        for start in range(start_at, len(clip_embeddings), batch_size):
-            chunk = clip_embeddings[start : start + batch_size].to(device)
+
+        # One embedding per call. Upstream's `unclip_recon` decodes a *single* embedding
+        # and returns `num_samples` variations of it — passing a batch of four silently
+        # returned one image and discarded the other three, which showed up only as
+        # "saved 2 reconstructions" after a bar that had counted to 8.
+        for index in range(start_at, len(clip_embeddings)):
+            chunk = clip_embeddings[index : index + 1].to(device)
             try:
                 samples = upstream_utils.unclip_recon(chunk, engine, vector_suffix,
                                                       num_samples=1)
             except RuntimeError as exc:
                 if "should be the same" not in str(exc):
                     raise
-                # A dtype boundary we did not anticipate. Promote the first stage to
-                # fp32 and retry once rather than losing the whole run.
                 log.warning("dtype mismatch during decode (%s); promoting first stage "
                             "to fp32 and retrying", exc)
                 engine.first_stage_model = engine.first_stage_model.float()
                 samples = upstream_utils.unclip_recon(chunk, engine, vector_suffix,
                                                       num_samples=1)
-            outs.append(samples.float().cpu())
-            done = min(start + batch_size, len(clip_embeddings))
-            bar.update(done - start)
+
+            image = samples.float().cpu()
+            if len(image) != 1:
+                # Keep the first variation so one image in always yields one image out.
+                log.debug("decoder returned %d samples for one embedding; keeping the "
+                          "first", len(image))
+                image = image[:1]
+            outs.append(image)
+
+            done = len(outs) + (start_at if not outs else 0)
+            bar.update(1)
             if hasattr(bar, "set_postfix_str"):
-                bar.set_postfix_str(eta_string(done - start_at,
+                bar.set_postfix_str(eta_string(index + 1 - start_at,
                                                len(clip_embeddings) - start_at,
                                                time.time() - t0))
-            # Every batch for short runs, every third for long ones: decoding is ~4 s an
-            # image, so a lost batch is cheap, but writing a growing tensor every time
-            # would dominate a 200-image arm.
-            checkpoint_now = (len(clip_embeddings) <= 32
-                              or (start // batch_size) % 3 == 0)
+            checkpoint_now = (len(clip_embeddings) <= 32 or (index % 3) == 0
+                              or index == len(clip_embeddings) - 1)
             if checkpoint_path is not None and checkpoint_now:
                 try:
-                    robust_save({"images": torch.cat(outs), "done": done}, checkpoint_path)
+                    robust_save({"images": torch.cat(outs), "done": index + 1},
+                                checkpoint_path)
                 except IOError as exc:
                     log.warning("decode checkpoint failed (%s); continuing", exc)
+
         bar.close()
-        return torch.cat(outs).clamp(0, 1)
+        images = torch.cat(outs).clamp(0, 1)
+        if len(images) != len(clip_embeddings):
+            log.warning("decoded %d images but %d embeddings were supplied",
+                        len(images), len(clip_embeddings))
+        return images
 
     raise RuntimeError(
         "Upstream `utils.unclip_recon` is unavailable, and reimplementing the sgm sampling "

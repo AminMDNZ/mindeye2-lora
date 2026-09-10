@@ -331,7 +331,7 @@ def cmd_recon(args):
                         reconstruct_for_run(
                             store_dir, out, ws, n_images=n_images, decoder=decoder,
                             device=_device(), num_steps=args.num_steps,
-                            batch_size=args.batch_size or 4, unclip_dir=args.unclip_dir,
+                            batch_size=1, unclip_dir=args.unclip_dir,
                         )
                         decoded = True
                     except Exception as exc:
