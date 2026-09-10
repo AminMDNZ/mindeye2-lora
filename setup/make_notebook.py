@@ -20,22 +20,23 @@ def code(src):
 
 cells = [
 md("""
-# MindEye2 + LoRA — Colab driver
+# MindEye2 + LoRA
 
 Adapts the pretrained shared-subject MindEye2 model to a held-out subject with ~1 hour
-of fMRI, six different ways (frozen / BitFit / LoRA r=4,16,64 / full fine-tune), then
-compares them statistically and shows images.
+of fMRI, six different ways, then compares them statistically and reconstructs images.
 
-**Every cell is safe to re-run.** If the runtime disconnects, reconnect, run cells 1-2
-again, and continue — each stage checks the manifest on Drive and skips finished work.
+**Run cells 1 and 2 at the start of every session.** After that, jump to whichever stage
+you need — every stage checkpoints to Drive and skips work already done, so a disconnect
+costs minutes rather than hours.
 
-Runtime → Change runtime type → **GPU** (T4 is fine to start).
+Runtime → Change runtime type → **GPU**.
 """),
 
 md("""
-## 1. Clone / update the repo
+## 1. Environment
 
-Mounts Drive and clones the repo, or pulls if it is already there.
+Clones or updates the repo, mounts Drive, installs dependencies from the Drive-backed
+pip cache. 2–4 minutes the first time in a fresh runtime, under a minute afterwards.
 """),
 code("""
 import os, sys
@@ -53,43 +54,30 @@ else:
     !git clone https://github.com/{GITHUB_USER}/{REPO_NAME}.git {REPO}
 
 os.chdir(REPO)
-
-# Fail here with a clear message rather than three cells later on a cryptic ImportError
 assert os.path.isdir(f"{REPO}/src/mindeye_lora"), (
-    f"{REPO}/src/mindeye_lora not found. If GitHub shows a nested "
-    f"{REPO_NAME}/{REPO_NAME}/ folder, the contents were uploaded one level too deep."
+    f"{REPO}/src/mindeye_lora not found — check the repo layout on GitHub."
 )
 print("repo ready:", os.getcwd())
 """),
 
 code("""
 !bash setup/colab_setup.sh
-# bitsandbytes needs its real dependency chain to find CUDA, so it is installed
-# separately rather than through the --no-deps path the setup script uses.
 !pip install -q bitsandbytes
 """),
 
 md("""
-Installs come from the Drive-backed pip cache: 2-4 minutes the first time, under a
-minute afterwards. The script resolves `dalle2-pytorch`'s transitive imports
-automatically and ends with `dalle2_pytorch OK` / `environment ready`.
-
-Colab sometimes needs a kernel restart after installs. If cell 2 fails on imports, run
-this, then continue from cell 2 — nothing downloaded is lost.
-"""),
-code("""
-# import IPython; IPython.Application.instance().kernel.do_shutdown(True)
+**If you edit any file under `src/`, restart the runtime before re-running.** Python
+caches imported modules, so copying a file into place does not change what is running —
+you get errors whose line numbers point at the new file while the old code executes.
+This cost several debugging rounds during development.
 """),
 
 md("""
-## 2. Attach to the workspace
+## 2. Attach
 
-**Run this first after any kernel restart or reconnect.** `main`, the Drive root and the
-working directory are all lost on restart; the usual symptom is
+Re-imports `main`, sets the Drive root, and enters the repo directory. All three are
+lost on a kernel restart; the usual symptom is
 `NameError: name 'main' is not defined`.
-
-Setting `MINDEYE_LORA_ROOT` matters: without it the workspace silently falls back to
-local disk, and every cached download disappears when the session ends.
 """),
 code("""
 import os, sys
@@ -108,7 +96,7 @@ main(["setup", "--config", CONFIG])
 """),
 
 code("""
-# What you actually got. Colab assigns GPUs; Pro gives priority, not a guarantee.
+# What GPU did Colab give you? It assigns, you cannot choose.
 import torch
 
 if not torch.cuda.is_available():
@@ -118,73 +106,70 @@ else:
     free, total = torch.cuda.mem_get_info()
     gb = total / 1024**3
     print(f"{p.name} — {gb:.1f} GB total, {free/1024**3:.1f} GB free")
-    if gb < 24:
-        print("  -> use configs/colab_t4.yaml (hidden_dim=1024).")
-        print("     configs/a100_paper_scale.yaml needs ~24 GB and will be refused.")
-    else:
-        print("  -> configs/a100_paper_scale.yaml will fit (hidden_dim=4096).")
+    print("  -> configs/colab_t4.yaml" if gb < 24
+          else "  -> configs/a100_paper_scale.yaml will also fit")
 """),
 
 md("""
 ## 3. Which config
 
-| config | needs | what it gives you |
+| config | needs | gives you |
 |---|---|---|
 | `configs/smoke.yaml` | any GPU, ~30 min | proof the pipeline runs — **start here** |
-| `configs/colab_t4.yaml` | 15 GB, hours | **the actual experiment**: 6 arms x 3 seeds x 150 epochs |
-| `configs/a100_paper_scale.yaml` | 24 GB+, `bitsandbytes` | efficiency numbers at 4096 (2.1B params) |
+| `configs/colab_t4.yaml` | 15 GB, hours | **the experiment**: 6 arms x 3 seeds x 150 epochs |
+| `configs/a100_paper_scale.yaml` | 24 GB+ | efficiency numbers at 4096 (2.1B params) |
 
-**The T4 config is the experiment, not a fallback.** It produces the complete result:
-retention ratio, equivalence test, six arms, three seeds. The A100 config answers a
-different question — at `hidden_dim=4096` the gap between LoRA and full fine-tuning
-becomes ~23 GB vs ~11 GB of VRAM and ~8 GB vs a few MB per subject. Compelling for a
-writeup, but a supplement rather than the finding.
+The T4 config is the experiment, not a fallback — it produces the retention ratio,
+equivalence test and full report. The A100 config answers a different question: at
+`hidden_dim=4096` the gap between LoRA and full fine-tuning becomes ~23 GB vs ~11 GB of
+VRAM and ~8 GB vs a few MB per subject. A supplement, not the finding.
 
-You cannot force an A100; Colab assigns them. Run the T4 experiment and treat a large
-GPU as a bonus. `assets` refuses a config the current GPU cannot hold, before spending
-ten minutes on a ~10 GB download.
+Edit `CONFIG` in cell 2 and re-run it to switch.
 
-To switch, edit `CONFIG` in the cell above and re-run it.
-
-Global flags work on either side of the subcommand, so `main(["train", "--config",
-CONFIG])` and `main(["--config", CONFIG, "train"])` are equivalent.
+Global flags work on either side of the subcommand: `main(["train", "--config", CONFIG])`
+and `main(["--config", CONFIG, "train"])` are equivalent.
 """),
 
 md("""
 ## 4. Everything, in one resumable command
 
 Runs assets → precompute → train → predict → recon → evaluate → compare → report,
-skipping anything already finished. Re-run it verbatim after any disconnect.
+skipping whatever is already done. Re-run verbatim after any disconnect.
 
-Prefer to watch stage by stage? Skip this cell and use sections 5-13 instead.
+For the image-heavy stages you may prefer the individual cells below.
 """),
 code("""
 main(["run-all", "--config", CONFIG])
+"""),
+
+code("""
+# Where things stand. Safe to run in a second cell while something else is working.
+main(["status", "--config", CONFIG])
 """),
 
 md("""
 ## 5. Assets
 
 Downloads only what is needed. The 22 GB COCO image file is **sliced remotely over
-HTTPS** — just the ~1,750 rows this experiment touches. The 2.86 GB pretrained
-checkpoint is slimmed to weights-only and the original deleted.
+HTTPS** — just the ~1,750 rows this experiment touches — and the fetch resumes per
+256-row chunk if the CDN returns a 503. The 2.86 GB pretrained checkpoint is slimmed to
+weights-only.
 
-First run: 10-20 minutes. Afterwards: instant. Watch for repeated `fetched N/M rows`.
+First run: 10–20 minutes. Afterwards: instant.
 """),
 code("""
 main(["assets", "--config", CONFIG])
 """),
 
 md("""
-## 6. Verify the pretrained weights
+## 6. Verify
 
-**The stage most likely to fail, and the cheapest place to find out.** It builds the
-model, loads the shared-subject checkpoint, and refuses to continue if any non-ridge
-parameter is missing — which would quietly turn "fine-tuning" into "training from
-scratch" and invalidate the whole comparison.
+The cheapest place to catch the worst failure. It builds the model, loads the
+shared-subject checkpoint, and refuses to continue if any non-ridge parameter is
+missing — which would quietly turn "fine-tuning" into "training from scratch".
 
-Look for `skipped 7 pretrained ridge tensors`: those are subjects 2-8's subject-specific
-layers, correctly left behind so subject 1 gets a fresh one.
+Look for `skipped 14 pretrained ridge tensors`: 7 subjects x (weight + bias), correctly
+left behind so subject 1 gets a fresh ridge layer that every arm trains.
 """),
 code("""
 main(["verify", "--config", CONFIG])
@@ -194,8 +179,7 @@ md("""
 ## 7. Precompute CLIP embeddings
 
 Embeds each stimulus once with OpenCLIP ViT-bigG/14 and caches the 256x1664 token
-embeddings in fp16. This keeps the 2.5 GB vision tower out of memory during training,
-which is what makes the T4 config fit.
+embeddings in fp16, so the 2.5 GB vision tower is never resident during training.
 """),
 code("""
 main(["precompute", "--config", CONFIG])
@@ -208,12 +192,7 @@ One run per (arm, seed). All arms share data order, schedule and starting weight
 the trainable parameter set differs. Watch the `trainable` counts differ by orders of
 magnitude — that line is the experiment in miniature.
 
-State is saved to Drive every 10 minutes and at each epoch boundary, and
-`time_budget_min` stops cleanly before a session is likely to be reclaimed. Re-run this
-cell next session to continue.
-
-Progress reports at three levels — stage, run within the sweep, and batch within the
-run — so a long stage is never indistinguishable from a hang:
+Progress reports at three levels, so a long stage is never mistaken for a hang:
 
 ```
 ╔═ training runs 5/18 · subj01_1sess_lora_r16_seed0 ═══
@@ -221,84 +200,54 @@ run — so a long stage is never indistinguishable from a hang:
 lora_r16 seed0 · epoch 3/150: 41%|████  | 47/114 [01:52<02:39, loss=10.264]
 ```
 
-A memory preflight runs before each arm and refuses runs it predicts will not fit,
-naming a `batch_size` / `grad_accum` pair that should. The shipped configs use
-`batch_size: 6, grad_accum: 4` — an effective batch of 24, matching the paper, split
-because the diffusion prior's attention allocates a `[batch, 32 heads, 257, 257]`
-similarity matrix per layer and OOMs a T4 at batch 24.
+State is saved every 10 minutes and at each epoch boundary; `time_budget_min` stops
+cleanly before a session is reclaimed. Re-run this cell next session to continue.
 """),
 code("""
 main(["train", "--config", CONFIG])
 """),
 
-code("""
-# where things stand — worth running after any disconnect
-main(["status", "--config", CONFIG])
-"""),
-
 md("""
 ## 9. Predict
 
-Runs each trained model over the test set and caches its predicted CLIP embeddings,
-sampled through the diffusion prior. Roughly 12 minutes per arm.
+Runs each trained model over the 1,000 test images and streams predicted CLIP
+embeddings to disk as fp16 memmaps. ~13 min per arm.
 
-Partial results are written every 5 batches and resumed automatically, so a disconnect
-costs a minute or two rather than the whole arm.
-
-Checkpoints are fsynced, read back to verify, and rotated so the previous good copy
-survives as `.bak` — Google Drive uploads asynchronously, so a file that finished
-writing locally can still be truncated if the VM is reclaimed a moment later. A corrupt
-primary falls back to the backup automatically; nothing needs deleting by hand.
+Streaming matters: holding these in RAM is ~1.7 GB per tensor, and concatenating several
+exceeds a 12 GB Colab VM — which appears as "your session crashed after using all
+available RAM" with no traceback.
 """),
 code("""
 main(["predict", "--config", CONFIG])
-
-# or one arm at a time, if the connection is unreliable:
-# main(["predict", "--config", CONFIG, "--arm", "frozen"])
-# main(["predict", "--config", CONFIG, "--arm", "lora_r16"])
-# main(["predict", "--config", CONFIG, "--arm", "full"])
 """),
 
 md("""
 ## 10. Images
 
-Two paths, and this cell always produces something.
+Two paths.
 
-**Retrieval fallback** (default): the nearest test-set images to each predicted
-embedding, top-3, with correct hits outlined and the true rank annotated. Seconds, no
-downloads. These are **retrieved photographs, not generated images** — a correct top-1
-is pixel-identical to the stimulus, which is a retrieval hit rather than a
-reconstruction. It is also a coarse discriminator: arms a few percent apart often give
-identical rows, so read the statistics for the size of any difference.
+**Retrieval panel** (default, seconds): the nearest test-set images to each predicted
+embedding, top-3, correct hits outlined. These are **retrieved photographs, not
+generated** — a correct top-1 is pixel-identical to the stimulus. It is also a coarse
+discriminator, so read the statistics for the size of any difference.
 
-**SDXL unCLIP decoder** (`--decoder sdxl_unclip`): the paper's decoder, and real
-generation. 18 GB download once, then split into fp16 shards (~9 GB) that are reused.
-Roughly 4 s/image. It runs fine on a T4 — the encoder is not loaded during this stage,
-so ~7 GB of VRAM suffices. Frozen and identical across arms, so it adds no between-arm
-variance and every statistic works without it.
+**SDXL unCLIP decoder** (real generation): 18 GB download once, then split into fp16
+shards that are reused. **~45 s/image on a T4**, so budget accordingly — 32 images x 3
+arms is about 40 minutes. It runs fine on a T4: the encoder is not loaded here, the 1.9B
+CLIP image embedder is dropped from the conditioner, and xformers is replaced by
+PyTorch's native attention, leaving the decoder at ~5 GB of VRAM.
+
+The report's grid shows at most three arms, so decoding more than three is wasted time.
 """),
 code("""
+# retrieval panel only — fast, no downloads
 main(["recon", "--config", CONFIG])
-
-# real generated images — uncomment on an A100 with disk to spare
-# main(["recon", "--config", CONFIG, "--decoder", "sdxl_unclip",
-#       "--arm", "frozen", "lora_r16", "full", "--n_images", "32"])
 """),
 
 code("""
-# Inspect resume points — useful after a disconnect, never required.
-# Corrupt files are handled automatically; this just shows what survived.
-from pathlib import Path
-import torch
-
-for p in sorted(Path(os.environ["MINDEYE_LORA_ROOT"]).glob("runs/*/predictions.partial.pt")):
-    try:
-        d = torch.load(p, map_location="cpu", weights_only=False)
-        print(f"{p.parent.name:36s} resumable from batch {d.get('batches_done')}")
-    except Exception as exc:
-        print(f"{p.parent.name:36s} primary unreadable ({str(exc)[:40]}...)")
-        bak = Path(str(p) + ".bak")
-        print(f"{'':36s} backup {'available' if bak.exists() else 'MISSING'}")
+# real generated images (slow). 8 for a smoke test, 32 for the real run.
+main(["recon", "--config", CONFIG, "--decoder", "sdxl_unclip",
+      "--arm", "frozen", "lora_r16", "full", "--n_images", "8"])
 """),
 
 md("""
@@ -306,19 +255,22 @@ md("""
 
 Per-image metrics on all 1,000 test images. Two CLIP-space measures always:
 
-- `two_way_clip` — per-image probability the true image outranks a random distractor
-  (chance = 0.5)
-- `cosine` — similarity between the predicted and true CLIP token embeddings
+- `two_way_clip` — probability the true image outranks a random distractor (chance 0.5)
+- `cosine` — similarity between predicted and true CLIP token embeddings
 
-These measure different things and can disagree: a fine-tune can shift the embedding
-geometry (hurting cosine) while separating images better (helping two-way). A third
-measure, `retrieval_percentile`, is excluded by default because it is algebraically
-identical to `two_way_clip` — reporting both would make one result look like two.
+They measure different things and can disagree: a fine-tune can shift embedding geometry
+(hurting cosine) while separating images better (helping two-way). A third measure,
+`retrieval_percentile`, is excluded because it is algebraically identical to
+`two_way_clip` — reporting both would make one result look like two.
 
-The eight MindEye image metrics are added as well if reconstructions exist.
+The eight MindEye image metrics are added where reconstructions exist. Note they only
+cover the images you decoded, so their confidence intervals are much wider than the
+CLIP-space ones.
+
+First run downloads AlexNet, Inception, EfficientNet and SwAV (~500 MB total).
 """),
 code("""
-main(["evaluate", "--config", CONFIG])
+main(["evaluate", "--config", CONFIG, "--force"])
 """),
 
 md("""
@@ -328,8 +280,8 @@ Paired statistics against the full fine-tune: BCa bootstrap intervals, Wilcoxon 
 Holm correction, Cohen's d_z, TOST equivalence, and the retention ratio.
 
 Expect a difference that is *statistically detectable but practically negligible* for a
-well-chosen rank. Both facts get reported, because with ~1,000 paired test images you
-can detect gaps far below anything that matters.
+well-chosen rank. Both facts get reported: with ~1,000 paired images you can detect gaps
+far below anything that matters, which is exactly why the equivalence test is there.
 """),
 code("""
 main(["compare", "--config", CONFIG])
@@ -346,15 +298,14 @@ code("""
 from IPython.display import HTML, display
 from pathlib import Path
 
-# The HTML twin embeds its figures, so it renders correctly here. The markdown
-# version links relative paths, which a notebook resolves against its own working
-# directory rather than the report's folder -- hence blank images.
+# The HTML twin embeds its figures. The markdown version uses relative paths, which a
+# notebook resolves against its own working directory — hence blank images.
 report = Path(os.environ["MINDEYE_LORA_ROOT"]) / "results/reports/REPORT.html"
 display(HTML(report.read_text()))
 """),
 
 code("""
-# Individual figures at full size, if you want them separately from the report.
+# Individual figures at full size.
 from IPython.display import Image, display
 from pathlib import Path
 
@@ -367,66 +318,52 @@ for p in sorted(figdir.glob("*.png")):
 md("""
 ---
 
+## Reading the report
+
+**1. frozen→full headroom, first.** If it is tiny, the shared-subject model was already
+nearly sufficient and neither method had room to differ. If it is *negative*, full
+fine-tuning did worse than not adapting at all, the retention ratio divides by a negative
+number, and the finding changes shape entirely.
+
+**2. Retention ratio** — the fraction of the achievable gain each arm recovered, with a
+bootstrap interval. An interval spanning zero establishes nothing.
+
+**3. Equivalence column** — the positive claim: the gap is *bounded* below the margin. A
+non-significant p-value alone never establishes equivalence.
+
+**4. Seed variability** — any between-arm difference smaller than the between-seed sd is
+not worth interpreting.
+
+The bar chart's y-axis is zoomed to the data, so bar height is not proportional to score:
+the arms differ by ~0.02 on a metric whose floor is 0.5. The chance line is marked.
+
 ## If something breaks
 
 **`NameError: name 'main' is not defined`** — the kernel restarted. Re-run cell 2.
 
-**CUDA out of memory.** The error names a `batch_size` / `grad_accum` pair that should
-fit; apply it in the config, keeping the product at 24. Then **restart the runtime**
-before retrying: a CUDA OOM in a notebook is sticky, because the traceback holds every
-local in every frame including the model that just failed, so a retry often OOMs before
-training even starts. Nothing on Drive is lost.
-
-**Every slow stage shows progress and checkpoints.** Asset fetching resumes per
-256-row chunk, CLIP embedding per ~10 batches, training per epoch, predict per 5
-batches, and SDXL decoding per ~3 batches. Re-run the same command and it continues.
-
-**Nothing needs deleting after a crash.** Checkpoints are written durably and kept in
-two generations; a corrupt one falls back to its backup, and if both are bad they are
-removed automatically and that stage restarts. Re-run the same command.
-
-**"needs roughly 24 GB of VRAM but this GPU has 15.0 GB".** You are on a T4 or L4 and
-selected the paper-scale config. Switch `CONFIG` to `configs/colab_t4.yaml`.
-
-**"Your session crashed after using all available RAM".** That is the VM's 12 GB system
-memory, not the GPU. `predict` streams to disk so it should not recur; if it does, try
+**"Your session crashed after using all available RAM"** — the VM's 12 GB system memory,
+not the GPU. `predict` streams to disk so this should not recur; if it does, try
 `--num_workers 0`.
 
-**Is it stuck?** Check the GPU from a second cell:
-`!nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader`.
-A few MiB of memory means no process holds the GPU — the run died rather than stalled,
-so reconnect and re-run. Several GB held at a sustained 0% means it is blocked on data
-loading, not computing. Data caches are mirrored to local disk automatically because
-Drive is slow at the random-access reads the loaders do; `--no-local-cache` disables it.
+**CUDA out of memory** — the error names a `batch_size` / `grad_accum` pair that fits;
+apply it in the config, keeping the product at 24. Then **restart the runtime** before
+retrying: a CUDA OOM is sticky, because the traceback holds the model that just failed,
+so a retry often OOMs before it starts.
 
-**Anything about a missing module.** `colab_setup.sh` resolves missing packages
+**"needs roughly 24 GB of VRAM but this GPU has 15.0 GB"** — you selected the paper-scale
+config on a T4 or L4. Switch `CONFIG` to `configs/colab_t4.yaml`.
+
+**Missing module** — run `bash setup/colab_setup.sh`. It resolves dependencies
 automatically. If it reports the *same* module twice, that is a moved import path rather
-than an absent package and needs a code fix, not another install.
+than an absent package and needs a code fix.
 
-**`Refusing to run: the 'pretrained' baseline would be fake`.** Upstream's architecture
-no longer matches the checkpoint. Do not work around this — it would mean training from
-scratch while calling it fine-tuning. Pin a revision with `--upstream_ref=<sha>`.
+**`Refusing to run: the 'pretrained' baseline would be fake`** — upstream's architecture
+no longer matches the checkpoint. Do not work around this; pin a revision with
+`--upstream_ref=<sha>`.
 
-## Reading the report
-
-**1. frozen→full headroom, first.** If it is tiny, the shared-subject model was already
-nearly sufficient, neither method had room to differ, and nothing else means much. If it
-is *negative*, full fine-tuning did worse than not adapting at all — the retention ratio
-then divides by a negative number and is meaningless. Expect this at 10 epochs; it should
-reverse by 150.
-
-**2. Retention ratio** — the fraction of the achievable gain each arm recovered, with a
-bootstrap CI. An interval spanning zero means the run establishes nothing yet.
-
-**3. Equivalence column.** This is the positive claim: the gap is *bounded* below the
-margin. A non-significant p-value alone never establishes equivalence.
-
-**4. Seed variability.** Any between-arm difference smaller than the between-seed sd is
-not worth interpreting.
-
-Note the bar chart's y-axis is zoomed to the data, so bar height is not proportional to
-score — the arms differ by ~0.02 on a metric whose floor is 0.5, and a full 0-1 axis
-would render them identical. The chance line is marked.
+**Nothing needs deleting after a crash.** Checkpoints are fsynced, verified on read, and
+kept in two generations. A corrupt one falls back to its backup; if both are bad they are
+removed and that stage restarts. Re-run the same command.
 
 ## Poking at things
 
@@ -434,7 +371,7 @@ would render them identical. The chance line is marked.
 main(["train", "--config", CONFIG, "--arm", "lora_r16", "--seed", "0"])  # one run
 main(["verify", "--config", CONFIG, "--tree"])                           # every Linear layer
 main(["compare", "--config", CONFIG, "--equivalence_fraction", "0.1"])   # stricter margin
-main(["train", "--config", CONFIG, "--ignore-memory-check"])             # override preflight
+main(["recon", "--config", CONFIG, "--strict-decoder"])                  # full decoder traceback
 ```
 """),
 ]
