@@ -205,18 +205,33 @@ def cmd_train(args):
     arms = _selected_arms(cfg, args.arm)
     seeds = [int(s) for s in (args.seed or cfg.seeds)]
     results = []
+    stopped_early = False
     tracker = RunTracker(len(seeds) * len(arms), label="training runs")
     for seed in seeds:
+        if stopped_early:
+            break
         for arm in arms:
             run_name = cfg.run_name(arm.name, seed)
             prior = read_json(ws.run_dir(run_name) / "result.json")
             already = bool(prior and prior.get("completed"))
             tracker.start(run_name)
             try:
-                results.append(asdict(train_arm(
+                result = train_arm(
                     cfg, arm, seed, ws, device=device, resume=not args.restart,
-                    ignore_memory_check=args.ignore_memory_check)))
+                    ignore_memory_check=args.ignore_memory_check)
+                results.append(asdict(result))
                 tracker.finish(run_name, skipped=already)
+                if not result.completed:
+                    # The time budget stopped this arm mid-training. Starting the next
+                    # arm would leave the session with several half-trained runs rather
+                    # than finishing what is already underway; stop and let the next
+                    # session resume this one.
+                    log.warning(
+                        "%s stopped before finishing. Ending this session's training "
+                        "here so it resumes cleanly — re-run the same command.",
+                        run_name)
+                    stopped_early = True
+                    break
             except torch.cuda.OutOfMemoryError:
                 # Release before re-raising: otherwise the traceback pins the failed
                 # model and every later arm OOMs too, for no reason.
@@ -230,6 +245,8 @@ def cmd_train(args):
                 )
                 raise
     log.info("── %s ──", tracker.summary())
+    if stopped_early:
+        log.info("Training paused by the time budget. Re-run to continue where it left off.")
     write_json(ws["results"] / "training_summary.json", results)
     for r in results:
         print(f"{r['run_name']:44s} trainable={r['trainable_params']:>12,} "

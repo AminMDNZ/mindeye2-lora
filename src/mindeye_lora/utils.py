@@ -215,7 +215,7 @@ def robust_save(obj, path: str | Path, verify: bool = True, keep_backup: bool = 
     return path
 
 
-def robust_load(path: str | Path, validate=None, **load_kwargs):
+def robust_load(path: str | Path, validate=None, map_location="cpu", **load_kwargs):
     """Load a `robust_save` file, falling back to the `.bak` generation.
 
     Returns None if neither generation is usable, having removed the bad files so the
@@ -232,7 +232,13 @@ def robust_load(path: str | Path, validate=None, **load_kwargs):
         if not candidate.exists():
             continue
         try:
-            obj = torch.load(candidate, map_location="cpu", weights_only=False, **load_kwargs)
+            # map_location is an explicit parameter, not swept into **load_kwargs:
+            # callers naturally pass it, and having it in both places raised
+            # "got multiple values for keyword argument 'map_location'" — which the
+            # error handling then treated as a corrupt file and deleted, so training
+            # resume silently never worked.
+            obj = torch.load(candidate, map_location=map_location, weights_only=False,
+                             **load_kwargs)
             if validate is not None:
                 validate(obj)
             if label == "backup":
