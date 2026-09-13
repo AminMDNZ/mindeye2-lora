@@ -1,21 +1,3 @@
-"""A small, dependency-free LoRA implementation targeted at MindEye2.
-
-Why not `peft`? MindEye2's modules are hand-written `nn.Module`s (a residual MLP
-backbone plus a DALLE-2 style diffusion prior), not a HuggingFace `PreTrainedModel`.
-Wrapping them ourselves is ~200 lines, keeps the injection rules explicit, and lets us
-report exactly which layers were adapted — which matters when the whole point of the
-experiment is to attribute performance to specific parameter groups.
-
-Key design points
------------------
-* `B` is zero-initialised, so an injected model is *numerically identical* to the
-  pretrained one at step 0. This is what makes the LoRA arm and the full fine-tune arm
-  share an identical starting point.
-* Targeting is by regex on the fully-qualified module path, so nothing is hard-coded to
-  upstream attribute names.
-* `merge_()` folds the adapter into the base weight, so inference costs exactly the same
-  as the original model — a real advantage over the frozen-plus-side-network baselines.
-"""
 from __future__ import annotations
 
 import math
@@ -36,8 +18,8 @@ class LoRAConfig:
     dropout: float = 0.0
     target_modules: Sequence[str] = field(default_factory=lambda: [r"^backbone\.", r"^diffusion_prior\."])
     exclude_modules: Sequence[str] = field(default_factory=lambda: [r"^ridge\."])
-    variant: str = "lora"            # "lora" | "dora"
-    use_rslora: bool = False         # scale by alpha/sqrt(r) instead of alpha/r
+    variant: str = "lora"            
+    use_rslora: bool = False         
     init_scale: float = 1.0
 
     @property
@@ -75,14 +57,12 @@ class LoRALinear(nn.Module):
         self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
 
         if self.variant == "dora":
-            # weight-decomposed LoRA: learn the column magnitudes separately
             with torch.no_grad():
                 norm = base.weight.norm(p=2, dim=1, keepdim=True)
             self.lora_magnitude = nn.Parameter(norm.clone())
         else:
             self.register_parameter("lora_magnitude", None)
 
-    # -- maths ---------------------------------------------------------------------
     def delta_w(self) -> torch.Tensor:
         return (self.lora_B @ self.lora_A) * self.scaling
 
@@ -101,7 +81,6 @@ class LoRALinear(nn.Module):
         lora_out = self.dropout(x) @ self.lora_A.to(x.dtype).T @ self.lora_B.to(x.dtype).T
         return out + lora_out * self.scaling
 
-    # -- merging -------------------------------------------------------------------
     @torch.no_grad()
     def merge_(self) -> None:
         if self.merged or self.r == 0:
@@ -118,14 +97,11 @@ class LoRALinear(nn.Module):
         self.base.weight.data -= self.delta_w()
         self.merged = False
 
-    def extra_repr(self) -> str:  # pragma: no cover
+    def extra_repr(self) -> str:  
         return (f"in={self.base.in_features}, out={self.base.out_features}, r={self.r}, "
                 f"scaling={self.scaling:.3f}, variant={self.variant}")
 
 
-# --------------------------------------------------------------------------------------
-# injection
-# --------------------------------------------------------------------------------------
 def _matches(name: str, patterns: Iterable[str]) -> bool:
     return any(re.search(p, name) for p in patterns)
 
@@ -199,10 +175,7 @@ def unmerge_lora(model: nn.Module) -> nn.Module:
         m.unmerge_()
     return model
 
-
-# --------------------------------------------------------------------------------------
-# freezing policy
-# --------------------------------------------------------------------------------------
+ 
 def set_trainable(
     model: nn.Module,
     mode: str,
@@ -237,10 +210,7 @@ def set_trainable(
         unfreeze_named(lambda n, p: n.endswith(".bias"))
     else:
         raise ValueError(f"Unknown trainable mode: {mode}")
-
-    # always-trainable groups (the subject-specific ridge layer is randomly initialised
-    # for a held-out subject, so it must be learned in every arm — there is no
-    # pretrained weight for LoRA to be "low-rank relative to").
+    
     unfreeze_named(lambda n, p: _matches(n, always_trainable))
 
     if train_bias == "all":
@@ -268,16 +238,12 @@ def set_trainable(
     return summary
 
 
-# --------------------------------------------------------------------------------------
-# adapter checkpoints
-# --------------------------------------------------------------------------------------
 def adapter_state_dict(model: nn.Module, extra: Sequence[str] = (r"^ridge\.",)) -> dict:
     """Only the tensors this arm actually learned — a few MB instead of a gigabyte."""
     sd = {}
     for name, param in model.named_parameters():
         if ".lora_" in name or _matches(name, extra) or param.requires_grad:
             sd[name] = param.detach().cpu()
-    # LayerNorm/BatchNorm buffers that training may have touched
     for name, buf in model.named_buffers():
         if _matches(name, extra):
             sd[name] = buf.detach().cpu()

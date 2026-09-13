@@ -48,7 +48,7 @@ recon_decoder: none    # switch to sdxl_unclip once you have disk for the 18 GB 
 recon_n_images: 100
 recon_seed: 0
 qualitative_n: 8
-qualitative_arms: 3
+qualitative_arms: 5
 retrieval_fallback: true
 retrieval_k: 3
 
