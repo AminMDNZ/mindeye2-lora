@@ -1,5 +1,8 @@
-# Default experiment: adapt the shared-subject MindEye2 model to subject 1 using one
-# scanning session (~1 hour of data), on a single Colab T4.
+# The main experiment: adapt the shared-subject MindEye2 model to subject 1 using one
+# scanning session (~1 hour of data), six ways, across three seeds.
+#
+# Model scale is hidden_dim=1024 (~729M parameters), which fits a 16 GB GPU. Use
+# configs/paper_scale.yaml for the 4096 variant if you have 24 GB or more.
 #
 # Sizing notes for 16 GB:
 #   * pretrain=multisubject_1024 -> hidden_dim 1024 instead of 4096 (upstream reports
@@ -48,7 +51,7 @@ recon_decoder: none    # switch to sdxl_unclip once you have disk for the 18 GB 
 recon_n_images: 100
 recon_seed: 0
 qualitative_n: 8
-qualitative_arms: 5
+qualitative_arms: 3
 retrieval_fallback: true
 retrieval_k: 3
 

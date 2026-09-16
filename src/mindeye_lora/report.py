@@ -386,6 +386,7 @@ def build_report(
     figures: dict[str, Path],
     primary_metric: str = "two_way_clip",
     embed_figures: bool = True,
+    reference: str = "full",
 ) -> Path:
     arms = _order(list(per_arm))
     metrics = [m for m in ALL_METRICS if any(m in per_arm[a] for a in arms)]
@@ -394,23 +395,95 @@ def build_report(
     lines += ["## Setup", ""]
     lines += [_table(["setting", "value"], [[k, v] for k, v in cfg_summary.items()]), ""]
 
-    lines += ["## Headline result", ""]
-    head = [r for r in retention if r["metric"] == primary_metric]
-    if head:
+    # --- headline -------------------------------------------------------------------
+    # Retention assumes the reference arm is the ceiling. When another arm beats it, or
+    # when the reference barely improves on the frozen baseline, that assumption fails
+    # and the ratio divides by a near-zero (or negative) denominator, producing figures
+    # like "292%" that look like findings and are not. Detect that and report the raw
+    # ranking instead.
+    ref_mean = float(np.mean(per_arm[reference][primary_metric])) if (
+        reference in per_arm and primary_metric in per_arm[reference]) else None
+    ranking = sorted(
+        ((a, float(np.mean(per_arm[a][primary_metric]))) for a in arms
+         if primary_metric in per_arm[a]),
+        key=lambda kv: -kv[1] if HIGHER_IS_BETTER.get(primary_metric, True) else kv[1],
+    )
+    headroom = next((r["headroom"] for r in retention if r["metric"] == primary_metric),
+                    float("nan"))
+    seed_noise = max(
+        (r["sd"] for r in seed_rows if r["metric"] == primary_metric), default=0.0)
+    beats_reference = bool(ranking and ref_mean is not None and ranking[0][0] != reference)
+    thin_headroom = bool(np.isfinite(headroom) and abs(headroom) < 5 * max(seed_noise, 1e-9))
+    retention_meaningful = not (beats_reference or thin_headroom)
+
+    lines += ["## Result", ""]
+    if ranking:
+        best, best_score = ranking[0]
+        lines.append(f"On `{primary_metric}`, the arms rank:")
+        lines.append("")
+        for rank, (arm, score) in enumerate(ranking, start=1):
+            sd = next((r["sd"] for r in seed_rows
+                       if r["arm"] == arm and r["metric"] == primary_metric), None)
+            tag = "  ← reference" if arm == reference else ""
+            sd_txt = f" ± {sd:.4f}" if sd else ""
+            lines.append(f"{rank}. **{arm}** {score:.4f}{sd_txt}{tag}")
+        lines.append("")
+
+    if beats_reference:
+        delta = next((c for c in comparisons
+                      if c["arm"] == ranking[0][0] and c["metric"] == primary_metric), None)
+        lines += [
+            f"**`{ranking[0][0]}` outperforms `{reference}`** by "
+            f"{delta['diff']:+.4f} [{delta['ci_low']:+.4f}, {delta['ci_high']:+.4f}] "
+            f"(p = {delta['p_holm']:.2g}), so the reference arm is not the ceiling here.",
+            "",
+            "> Retention ratios are reported below but should not be read as the headline: "
+            "they express each arm as a fraction of the reference's gain over the frozen "
+            "baseline, which only makes sense when the reference is the best arm. Use the "
+            "ranking above and the paired differences that follow.",
+            "",
+        ]
+    elif thin_headroom:
+        lines += [
+            f"The frozen→{reference} headroom on `{primary_metric}` is only "
+            f"{headroom:+.4f}, against a between-seed spread of {seed_noise:.4f}. "
+            "Adapting the pretrained weights buys very little over training the "
+            "subject-specific layer alone, so differences between adaptation strategies "
+            "have little room to matter.",
+            "",
+            "> Retention ratios below divide by that small headroom and are correspondingly "
+            "unstable. Read the raw scores and paired differences instead.",
+            "",
+        ]
+    else:
+        head = [r for r in retention if r["metric"] == primary_metric]
         for r in sorted(head, key=lambda x: -x["retention"]):
             lines.append(
                 f"- **{r['arm']}** recovers **{r['retention']*100:.1f}%** "
                 f"(95% CI {r['ci_low']*100:.1f}–{r['ci_high']*100:.1f}%) of the improvement "
-                f"that full fine-tuning achieves over the frozen shared model on "
+                f"that `{reference}` achieves over the frozen shared model on "
                 f"`{primary_metric}`."
             )
-        lines.append("")
-        lines.append(
-            "> Retention is measured against the frozen-backbone baseline, so it isolates "
-            "what adaptation of the *pretrained* weights buys. A value near 1.0 means the "
-            "low-rank update captured essentially all of the useful adaptation."
-        )
-        lines.append("")
+        lines += ["",
+                  "> Retention is measured against the frozen-backbone baseline, so it "
+                  "isolates what adaptation of the *pretrained* weights buys. A value near "
+                  "1.0 means the low-rank update captured essentially all of the useful "
+                  "adaptation.", ""]
+
+    if efficiency:
+        cheapest = min((e for e in efficiency if e["arm"] == ranking[0][0]), default=None,
+                       key=lambda e: e["trainable_params"]) if ranking else None
+        ref_eff = next((e for e in efficiency if e["arm"] == reference), None)
+        if cheapest and ref_eff and cheapest["arm"] != reference:
+            ratio = ref_eff["checkpoint_bytes"] / max(cheapest["checkpoint_bytes"], 1)
+            lines += [
+                f"Cost of that result: **{cheapest['trainable_params']:,} trainable "
+                f"parameters** ({human_bytes(cheapest['checkpoint_bytes'])} per subject) "
+                f"against {ref_eff['trainable_params']:,} "
+                f"({human_bytes(ref_eff['checkpoint_bytes'])}) for `{reference}` — "
+                f"a {ratio:.0f}x smaller checkpoint.",
+                "",
+            ]
 
     lines += ["## Per-image scores", ""]
     rows = []
@@ -446,6 +519,14 @@ def build_report(
 
     if retention:
         lines += ["## Retention of the achievable gain", ""]
+        if not retention_meaningful:
+            lines += [
+                "> **Not the headline for this run.** Retention divides by the "
+                f"frozen→{reference} headroom ({headroom:+.4f}); when that is small or the "
+                "reference is not the best arm, the ratio is unstable and can exceed 100% "
+                "or go negative without meaning anything. Included for completeness.",
+                "",
+            ]
         rrows = [[r["metric"], r["arm"], _fmt(r["retention"], 3),
                   f"[{_fmt(r['ci_low'],3)}, {_fmt(r['ci_high'],3)}]",
                   _fmt(r["headroom"], 4)] for r in retention]

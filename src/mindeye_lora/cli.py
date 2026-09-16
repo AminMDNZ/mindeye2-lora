@@ -7,7 +7,7 @@ stopped rather than starting over.
     python -m mindeye_lora.cli assets
     python -m mindeye_lora.cli precompute
     python -m mindeye_lora.cli train --arm lora_r16 --seed 0
-    python -m mindeye_lora.cli run-all --config configs/colab_t4.yaml
+    python -m mindeye_lora.cli run-all --config configs/main.yaml
 """
 from __future__ import annotations
 
@@ -125,8 +125,8 @@ def _check_gpu_fits_config(cfg, force: bool = False) -> None:
         message = (
             f"`pretrain: {cfg.pretrain}` needs roughly {need:.0f} GB of VRAM but this "
             f"GPU has {have:.1f} GB.\n"
-            f"  Switch to configs/colab_t4.yaml (pretrain: multisubject_1024), or "
-            f"request an A100 runtime.\n"
+            f"  Switch to configs/main.yaml (pretrain: multisubject_1024), or use a "
+            f"GPU with more memory.\n"
             f"  Pass --ignore-memory-check to proceed anyway."
         )
         if force:
@@ -605,6 +605,7 @@ def cmd_report(args):
         stats["retention"], efficiency_rows, stats["seed_variability"],
         {k: v for k, v in figs.items() if v},
         primary_metric=primary[0] if primary else "cosine",
+        reference=args.reference,
     )
     # keep figures next to the report so the markdown renders standalone
     for f in figdir.glob("*.png"):

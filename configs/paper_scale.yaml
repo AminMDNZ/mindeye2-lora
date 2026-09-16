@@ -1,6 +1,7 @@
 # Paper-scale variant: the hidden_dim=4096 shared-subject checkpoint (~2.1B parameters).
-# Needs an A100-class runtime (Colab Pro) and ~40 GB of workspace. On a T4, or on the
-# L4/V100 you may be assigned instead, this will OOM — use configs/colab_t4.yaml.
+# Needs ~24 GB of VRAM and ~40 GB of workspace; anything smaller will OOM, and the
+# pre-download capacity check refuses the run rather than wasting a ~10 GB fetch.
+# Use configs/main.yaml on a smaller GPU.
 #
 # This is also the configuration where LoRA matters most: the full fine-tune updates
 # roughly an order of magnitude more parameters than in the 1024-hidden setup, so the

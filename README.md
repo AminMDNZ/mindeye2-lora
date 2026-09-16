@@ -64,7 +64,7 @@ that varies is which parameters carry gradients.
 
 ```python
 # cell 3 — the real run
-!python -m mindeye_lora.cli run-all --config configs/colab_t4.yaml
+!python -m mindeye_lora.cli run-all --config configs/main.yaml
 ```
 
 If the runtime dies, **re-run the exact same command.** Every stage checks the workspace
@@ -241,11 +241,11 @@ retention ratio are there.
 
 ## Sizing
 
-| runtime | config | notes |
+| config | needs | what it runs |
 |---|---|---|
-| T4 (free) | `configs/colab_t4.yaml` | `hidden_dim=1024`, batch 24, ~10 GB |
-| A100 40GB | `configs/a100_paper_scale.yaml` | `hidden_dim=4096` (~2.1B params), 8-bit AdamW, adds targeting ablations |
-| anything | `configs/smoke.yaml` | 3 arms × 10 epochs, validates the pipeline |
+| `configs/smoke.yaml` | any GPU, ~30 min | 3 arms × 10 epochs — validates the pipeline |
+| `configs/main.yaml` | ~12 GB VRAM | **the experiment**: `hidden_dim=1024`, 6 arms × 3 seeds × 150 epochs |
+| `configs/paper_scale.yaml` | ~24 GB VRAM | `hidden_dim=4096` (~2.1B params), adds targeting ablations |
 
 ### Memory at paper scale
 
@@ -282,7 +282,7 @@ Memory tricks that make the T4 config fit: CLIP embeddings are precomputed so th
 bigG tower is never resident during training; the low-level VAE branch is disabled; fp16
 autocast throughout.
 
-The `a100_paper_scale.yaml` config also adds two targeting ablations — LoRA on the
+The `paper_scale.yaml` config also adds two targeting ablations — LoRA on the
 backbone only vs. the diffusion prior only — which answer a question the headline number
 can't: *where* does the adaptation actually need to happen?
 
@@ -408,7 +408,7 @@ src/mindeye_lora/
   stats.py          bootstrap, paired tests, Holm, TOST, retention ratio
   report.py         figures + REPORT.md
   cli.py            stage orchestration
-configs/            colab_t4 · a100_paper_scale · smoke
+configs/            smoke · main · paper_scale
 tests/              test_lora.py · test_stats.py · test_retrieval.py
 docs/               EXPERIMENT_DESIGN.md
 ```

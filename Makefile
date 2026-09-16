@@ -1,4 +1,4 @@
-CONFIG ?= configs/colab_t4.yaml
+CONFIG ?= configs/main.yaml
 PY     ?= python -m mindeye_lora.cli
 
 .PHONY: setup assets verify precompute train predict recon evaluate compare report all smoke test status clean-runs

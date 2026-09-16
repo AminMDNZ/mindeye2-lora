@@ -158,7 +158,7 @@ real possibility given that the shared-subject model was pretrained on seven peo
 
 **If LoRA underperforms at every rank:** check the LR confound first (§3), then the
 targeting ablations — it may be that the diffusion prior needs full adaptation while the
-backbone doesn't, which the `a100_paper_scale.yaml` config tests directly.
+backbone doesn't, which the `paper_scale.yaml` config tests directly.
 
 ---
 
@@ -182,7 +182,7 @@ backbone doesn't, which the `a100_paper_scale.yaml` config tests directly.
 ## 8. Reproducing
 
 ```bash
-python -m mindeye_lora.cli run-all --config configs/colab_t4.yaml
+python -m mindeye_lora.cli run-all --config configs/main.yaml
 ```
 
 Recorded for reproducibility in each run directory: the resolved config, the upstream
