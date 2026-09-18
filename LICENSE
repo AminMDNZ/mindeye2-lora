@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 Patric [Surname]
+Copyright (c) 2026 Amin Nezhad
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -29,8 +29,8 @@ copy or substantial portion of the code. Separately, and as a courtesy rather
 than a legal requirement, if you use this work in research please cite it. See
 CITATION.cff, or:
 
-    Patric [Surname] (2026). Low-Rank Adaptation of MindEye2 for Data-Efficient
-    fMRI-to-Image Decoding. https://github.com/<user>/mindeye2-lora
+    Amin Nezhad (2026). mindeye2-lora: Low-Rank Adaptation of MindEye2 for 
+    Data-Efficient fMRI-to-Image Decoding. https://github.com/AminMDNZ/mindeye2-lora
 
 --------------------------------------------------------------------------------
 
