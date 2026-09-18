@@ -1,0 +1,347 @@
+% BibTeX for mindeye2-lora and the works it builds on.
+% Entries match the reference list in the project report.
+%
+% If you use this repository, please cite it (key: mindeye2lora) and — more importantly —
+% cite MindEye2 and NSD, which are the substance of what the pipeline runs.
+
+% ------------------------------------------------------------------------------
+% This work
+% ------------------------------------------------------------------------------
+
+@software{nezhad2026mindeye2lora,
+  author = {Nezhad, Amin},
+  title = {{mindeye2-lora}: Low-Rank Adaptation of {MindEye2} for
+           Data-Efficient {fMRI}-to-Image Decoding},
+  year = {2026},
+  version = {v1.0.0},
+  publisher = {Zenodo},
+  doi = {10.5281/zenodo.22831388},
+  url = {https://github.com/AminMDNZ/mindeye2-lora},
+  license = {MIT},
+  note = {A controlled comparison of LoRA against full fine-tuning for
+          single-subject adaptation with one hour of scanning data}
+}
+
+% ------------------------------------------------------------------------------
+% Essential: the model and the data
+% ------------------------------------------------------------------------------
+
+@inproceedings{scotti2024mindeye2,
+  author    = {Scotti, Paul S. and Tripathy, Mihir and Torrico, Cesar Kadir
+               Villanueva and Kneeland, Reese and Chen, Tong and Narang, Ashutosh
+               and Santhirasegaran, Charan and Xu, Jonathan and Naselaris, Thomas
+               and Norman, Kenneth A. and Abraham, Tanishq Mathew},
+  title     = {{MindEye2}: Shared-Subject Models Enable {fMRI}-to-Image with
+               1 Hour of Data},
+  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {235},
+  pages     = {44038--44059},
+  year      = {2024},
+  eprint    = {2403.11207},
+  archivePrefix = {arXiv}
+}
+
+@article{allen2022nsd,
+  author  = {Allen, Emily J. and St-Yves, Ghislain and Wu, Yihan and
+             Breedlove, Jesse L. and Prince, Jacob S. and Dowdle, Logan T. and
+             Nau, Matthias and Caron, Brad and Pestilli, Franco and
+             Charest, Ian and Hutchinson, J. Benjamin and Naselaris, Thomas and
+             Kay, Kendrick},
+  title   = {A massive {7T} {fMRI} dataset to bridge cognitive neuroscience and
+             artificial intelligence},
+  journal = {Nature Neuroscience},
+  volume  = {25},
+  number  = {1},
+  pages   = {116--126},
+  year    = {2022},
+  doi     = {10.1038/s41593-021-00962-x}
+}
+
+@inproceedings{hu2022lora,
+  author    = {Hu, Edward J. and Shen, Yelong and Wallis, Phillip and
+               Allen-Zhu, Zeyuan and Li, Yuanzhi and Wang, Shean and
+               Wang, Lu and Chen, Weizhu},
+  title     = {{LoRA}: Low-Rank Adaptation of Large Language Models},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2022},
+  eprint    = {2106.09685},
+  archivePrefix = {arXiv}
+}
+
+% ------------------------------------------------------------------------------
+% fMRI decoding
+% ------------------------------------------------------------------------------
+
+@inproceedings{scotti2023mindeye,
+  author    = {Scotti, Paul S. and Banerjee, Atmadeep and Goode, Jimmie and
+               Shabalin, Stepan and Nguyen, Alex and Cohen, Ethan and
+               Dempster, Aidan J. and Verlinde, Nathalie and Yundler, Elad and
+               Weisberg, David and Norman, Kenneth A. and Abraham, Tanishq Mathew},
+  title     = {Reconstructing the Mind's Eye: {fMRI}-to-Image with Contrastive
+               Learning and Diffusion Priors},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {36},
+  year      = {2023},
+  eprint    = {2305.18274},
+  archivePrefix = {arXiv}
+}
+
+@article{kay2008identifying,
+  author  = {Kay, Kendrick N. and Naselaris, Thomas and Prenger, Ryan J. and
+             Gallant, Jack L.},
+  title   = {Identifying natural images from human brain activity},
+  journal = {Nature},
+  volume  = {452},
+  pages   = {352--355},
+  year    = {2008}
+}
+
+@article{horikawa2017generic,
+  author  = {Horikawa, Tomoyasu and Kamitani, Yukiyasu},
+  title   = {Generic decoding of seen and imagined objects using hierarchical
+             visual features},
+  journal = {Nature Communications},
+  volume  = {8},
+  pages   = {15037},
+  year    = {2017}
+}
+
+@article{naselaris2011encoding,
+  author  = {Naselaris, Thomas and Kay, Kendrick N. and Nishimoto, Shinji and
+             Gallant, Jack L.},
+  title   = {Encoding and decoding in {fMRI}},
+  journal = {NeuroImage},
+  volume  = {56},
+  number  = {2},
+  pages   = {400--410},
+  year    = {2011}
+}
+
+@inproceedings{takagi2023high,
+  author    = {Takagi, Yu and Nishimoto, Shinji},
+  title     = {High-Resolution Image Reconstruction with Latent Diffusion Models
+               from Human Brain Activity},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  pages     = {14453--14463},
+  year      = {2023}
+}
+
+@article{ozcelik2023natural,
+  author  = {Ozcelik, Furkan and VanRullen, Rufin},
+  title   = {Natural scene reconstruction from {fMRI} signals using generative
+             latent diffusion},
+  journal = {Scientific Reports},
+  volume  = {13},
+  pages   = {15666},
+  year    = {2023}
+}
+
+@article{prince2022glmsingle,
+  author  = {Prince, Jacob S. and Charest, Ian and Kurzawski, Jan W. and
+             Pyles, John A. and Tarr, Michael J. and Kay, Kendrick N.},
+  title   = {Improving the accuracy of single-trial {fMRI} response estimates
+             using {GLMsingle}},
+  journal = {eLife},
+  volume  = {11},
+  pages   = {e77599},
+  year    = {2022}
+}
+
+% ------------------------------------------------------------------------------
+% Cross-subject decoding
+% ------------------------------------------------------------------------------
+
+@inproceedings{wang2024mindbridge,
+  author    = {Wang, Shizun and Liu, Songhua and Tan, Zhenxiong and Wang, Xinchao},
+  title     = {{MindBridge}: A Cross-Subject Brain Decoding Framework},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2024}
+}
+
+@inproceedings{gong2025mindtuner,
+  author    = {Gong, Zixuan and Zhang, Qi and Bao, Guangyin and Zhu, Lei and
+               Xu, Rongtao and Liu, Ke and Hu, Liang and Miao, Duoqian},
+  title     = {{MindTuner}: Cross-Subject Visual Decoding with Visual Fingerprint
+               and Semantic Correction},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume    = {39},
+  pages     = {14247--14255},
+  year      = {2025}
+}
+
+% ------------------------------------------------------------------------------
+% Parameter-efficient fine-tuning
+% ------------------------------------------------------------------------------
+
+@inproceedings{houlsby2019adapters,
+  author    = {Houlsby, Neil and Giurgiu, Andrei and Jastrzebski, Stanislaw and
+               Morrone, Bruna and de Laroussilhe, Quentin and Gesmundo, Andrea and
+               Attariyan, Mona and Gelly, Sylvain},
+  title     = {Parameter-Efficient Transfer Learning for {NLP}},
+  booktitle = {Proceedings of the 36th International Conference on Machine Learning},
+  year      = {2019}
+}
+
+@inproceedings{aghajanyan2021intrinsic,
+  author    = {Aghajanyan, Armen and Gupta, Sonal and Zettlemoyer, Luke},
+  title     = {Intrinsic Dimensionality Explains the Effectiveness of Language
+               Model Fine-Tuning},
+  booktitle = {Proceedings of ACL-IJCNLP 2021},
+  pages     = {7319--7328},
+  year      = {2021}
+}
+
+@inproceedings{dettmers2023qlora,
+  author    = {Dettmers, Tim and Pagnoni, Artidoro and Holtzman, Ari and
+               Zettlemoyer, Luke},
+  title     = {{QLoRA}: Efficient Finetuning of Quantized {LLMs}},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {36},
+  year      = {2023}
+}
+
+@inproceedings{benzaken2022bitfit,
+  author    = {Ben Zaken, Elad and Goldberg, Yoav and Ravfogel, Shauli},
+  title     = {{BitFit}: Simple Parameter-efficient Fine-tuning for
+               Transformer-based Masked Language-models},
+  booktitle = {Proceedings of the 60th Annual Meeting of the Association for
+               Computational Linguistics},
+  year      = {2022}
+}
+
+% ------------------------------------------------------------------------------
+% Vision–language models and diffusion
+% ------------------------------------------------------------------------------
+
+@inproceedings{radford2021clip,
+  author    = {Radford, Alec and Kim, Jong Wook and Hallacy, Chris and
+               Ramesh, Aditya and Goh, Gabriel and Agarwal, Sandhini and
+               Sastry, Girish and Askell, Amanda and Mishkin, Pamela and
+               Clark, Jack and Krueger, Gretchen and Sutskever, Ilya},
+  title     = {Learning Transferable Visual Models From Natural Language
+               Supervision},
+  booktitle = {Proceedings of the 38th International Conference on Machine Learning},
+  year      = {2021}
+}
+
+@inproceedings{cherti2023openclip,
+  author    = {Cherti, Mehdi and Beaumont, Romain and Wightman, Ross and
+               Wortsman, Mitchell and Ilharco, Gabriel and Gordon, Cade and
+               Schuhmann, Christoph and Schmidt, Ludwig and Jitsev, Jenia},
+  title     = {Reproducible Scaling Laws for Contrastive Language-Image Learning},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2023}
+}
+
+@software{ilharco2021openclip,
+  author  = {Ilharco, Gabriel and Wortsman, Mitchell and Wightman, Ross and
+             Gordon, Cade and Carlini, Nicholas and Taori, Rohan and
+             Dave, Achal and Shankar, Vaishaal and Namkoong, Hongseok and
+             Miller, John and Hajishirzi, Hannaneh and Farhadi, Ali and
+             Schmidt, Ludwig},
+  title   = {{OpenCLIP}},
+  year    = {2021},
+  doi     = {10.5281/zenodo.5143773}
+}
+
+@article{ramesh2022dalle2,
+  author  = {Ramesh, Aditya and Dhariwal, Prafulla and Nichol, Alex and
+             Chu, Casey and Chen, Mark},
+  title   = {Hierarchical Text-Conditional Image Generation with {CLIP} Latents},
+  journal = {arXiv preprint arXiv:2204.06125},
+  year    = {2022}
+}
+
+@inproceedings{rombach2022ldm,
+  author    = {Rombach, Robin and Blattmann, Andreas and Lorenz, Dominik and
+               Esser, Patrick and Ommer, Bj{\"o}rn},
+  title     = {High-Resolution Image Synthesis with Latent Diffusion Models},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2022}
+}
+
+@inproceedings{podell2024sdxl,
+  author    = {Podell, Dustin and English, Zion and Lacey, Kyle and
+               Blattmann, Andreas and Dockhorn, Tim and M{\"u}ller, Jonas and
+               Penna, Joe and Rombach, Robin},
+  title     = {{SDXL}: Improving Latent Diffusion Models for High-Resolution
+               Image Synthesis},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2024}
+}
+
+@article{wang2022git,
+  author  = {Wang, Jianfeng and Yang, Zhengyuan and Hu, Xiaowei and Li, Linjie
+             and Lin, Kevin and Gan, Zhe and Liu, Zicheng and Liu, Ce and
+             Wang, Lijuan},
+  title   = {{GIT}: A Generative Image-to-Text Transformer for Vision and Language},
+  journal = {Transactions on Machine Learning Research},
+  year    = {2022}
+}
+
+@inproceedings{lin2014coco,
+  author    = {Lin, Tsung-Yi and Maire, Michael and Belongie, Serge and
+               Hays, James and Perona, Pietro and Ramanan, Deva and
+               Doll{\'a}r, Piotr and Zitnick, C. Lawrence},
+  title     = {{Microsoft COCO}: Common Objects in Context},
+  booktitle = {European Conference on Computer Vision (ECCV)},
+  year      = {2014}
+}
+
+% ------------------------------------------------------------------------------
+% Statistics
+% ------------------------------------------------------------------------------
+
+@article{wilcoxon1945,
+  author  = {Wilcoxon, Frank},
+  title   = {Individual Comparisons by Ranking Methods},
+  journal = {Biometrics Bulletin},
+  volume  = {1},
+  number  = {6},
+  pages   = {80--83},
+  year    = {1945}
+}
+
+@article{holm1979,
+  author  = {Holm, Sture},
+  title   = {A Simple Sequentially Rejective Multiple Test Procedure},
+  journal = {Scandinavian Journal of Statistics},
+  volume  = {6},
+  number  = {2},
+  pages   = {65--70},
+  year    = {1979}
+}
+
+@article{schuirmann1987tost,
+  author  = {Schuirmann, Donald J.},
+  title   = {A Comparison of the Two One-Sided Tests Procedure and the Power
+             Approach for Assessing the Equivalence of Average Bioavailability},
+  journal = {Journal of Pharmacokinetics and Biopharmaceutics},
+  volume  = {15},
+  number  = {6},
+  pages   = {657--680},
+  year    = {1987}
+}
+
+@article{lakens2017equivalence,
+  author  = {Lakens, Dani{\"e}l},
+  title   = {Equivalence Tests: A Practical Primer for $t$ Tests, Correlations,
+             and Meta-Analyses},
+  journal = {Social Psychological and Personality Science},
+  volume  = {8},
+  number  = {4},
+  pages   = {355--362},
+  year    = {2017}
+}
+
+@book{efron1993bootstrap,
+  author    = {Efron, Bradley and Tibshirani, Robert J.},
+  title     = {An Introduction to the Bootstrap},
+  publisher = {Chapman \& Hall/CRC},
+  year      = {1993}
+}
