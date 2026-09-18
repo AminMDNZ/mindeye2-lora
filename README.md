@@ -460,7 +460,18 @@ Reconstructions from the frozen SDXL unCLIP decoder: stimulus on top, one row pe
 `docs/figures/retrieval_grid.png` additionally shows, for each arm, the three nearest
 test-set images to the predicted embedding with the true image's rank among all 1,000
 candidates — retrieved photographs, not generated.
+## Citation
 
+If you use this repository in your research, please cite:
+
+```bibtex
+@software{nezhad2026mindeye2lora,
+  author = {Nezhad, Amin},
+  title = {mindeye2-lora: Low-Rank Adaptation of MindEye2 for Data-Efficient fMRI-to-Image Decoding},
+  year = {2026},
+  publisher = {Zenodo},
+  doi = {10.5281/zenodo.22831388}
+}
 ## Credit and licensing
 
 This is an analysis harness around other people's models. The architecture,
