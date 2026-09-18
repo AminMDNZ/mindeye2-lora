@@ -58,7 +58,7 @@ that varies is which parameters carry gradients.
 
 ```python
 # cell 1 — clone and set up (once per runtime, ~60s after the first time)
-!git clone https://github.com/<you>/mindeye2-lora.git
+!git clone https://github.com/AminMDNZ/mindeye2-lora.git
 %cd mindeye2-lora
 !bash setup/colab_setup.sh
 ```
