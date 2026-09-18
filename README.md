@@ -473,7 +473,7 @@ That is a request, not a licence condition; what MIT *does* require is that the 
 notice travels with any copy.
 
 ```bibtex
-@software{nezhad2026mindeye2lora,
+@software{amin2026mindeye2lora,
   author = {Nezhad, Amin},
   title = {{mindeye2-lora}: Low-Rank Adaptation of {MindEye2} for
            Data-Efficient {fMRI}-to-Image Decoding},
