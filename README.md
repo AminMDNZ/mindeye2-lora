@@ -1,4 +1,12 @@
-# MindEye2 + LoRA
+# mindeye2-lora
+
+[![DOI](https://zenodo.org/badge/DOI/YOUR_DOI.svg)](https://doi.org/YOUR_DOI)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**Low-Rank Adaptation of MindEye2 for Data-Efficient fMRI-to-Image Decoding**
+
+A controlled comparison of LoRA against full fine-tuning for adapting
+MindEye2 to a held-out participant with limited fMRI data.
 
 **Question:** when you adapt a pretrained shared-subject MindEye2 model to a new person
 with one hour of fMRI, does the pretrained backbone actually need a full fine-tune — or
