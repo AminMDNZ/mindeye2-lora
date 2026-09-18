@@ -5,10 +5,10 @@ title: >-
 message: If you use this software or its results, please cite it.
 type: software
 authors:
-  - given-names: Patric
-    family-names: "[Surname]"
+  - given-names: Amin
+    family-names: Nezhad
     # orcid: https://orcid.org/0000-0000-0000-0000
-repository-code: "https://github.com/<user>/mindeye2-lora"
+repository-code: "https://github.com/AminMDNZ/mindeye2-lora"
 abstract: >-
   A controlled comparison of LoRA against full fine-tuning for adapting the
   shared-subject MindEye2 fMRI-to-image model to a held-out participant with one
