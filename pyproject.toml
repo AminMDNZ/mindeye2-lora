@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mindeye-lora"
+version = "0.1.0"
+description = "LoRA vs. full fine-tuning for MindEye2 fMRI-to-image subject adaptation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "h5py>=3.10",
+    "fsspec[http]>=2024.2.0",
+    "huggingface_hub>=0.23",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+    "scikit-image>=0.22",
+    "tqdm>=4.66",
+    "open_clip_torch>=2.24",
+]
+
+[project.scripts]
+mindeye-lora = "mindeye_lora.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
