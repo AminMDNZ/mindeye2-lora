@@ -33,7 +33,7 @@ exempt you from the NSD conditions.
 | component | source | licence |
 |---|---|---|
 | MindEye2 code (`models.py`, `utils.py`, vendored `generative_models`) | [MedARC-AI/MindEyeV2](https://github.com/MedARC-AI/MindEyeV2) | MIT |
-| MindEye2 pretrained checkpoints | [pscotti/mindeyev2](https://huggingface.co/datasets/pscotti/mindeyev2) | released with the MindEye2 code; NSD-derived |
+| MindEye2 pretrained checkpoints | [pscotti/mindeyev2](https://huggingface.co/datasets/pscotti/mindeyev2) | MindEye2 pretrained weights; applicable upstream and NSD-related terms apply |
 | SDXL unCLIP decoder (`unclip6_epoch0_step110000.ckpt`) | [pscotti/mindeyev2](https://huggingface.co/datasets/pscotti/mindeyev2) | fine-tuned from SDXL → **CreativeML Open RAIL++-M**, with use restrictions |
 | OpenCLIP ViT-bigG/14 (`laion2b_s39b_b160k`) | [mlfoundations/open_clip](https://github.com/mlfoundations/open_clip) | MIT (code); weights trained on LAION-2B |
 | torchvision models used for image metrics (AlexNet, Inception V3, EfficientNet-B1) | [pytorch/vision](https://github.com/pytorch/vision) | BSD-3-Clause |
@@ -60,7 +60,7 @@ and logged rather than fatal.
 
 ## What this repository does and does not redistribute
 
-This repository contains **no** model weights, **no** fMRI data and **no** upstream code.
+This repository **does not** redistribute model weights, fMRI data, or vendored copies of upstream code.
 Everything is fetched at runtime from its original source:
 
 - `upstream.py` clones MindEyeV2 and imports its modules rather than vendoring a copy,
