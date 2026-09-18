@@ -468,9 +468,50 @@ checkpoints and decoder are from **MindEye2** (Scotti et al., ICML 2024) and are
 from `MedARC-AI/MindEyeV2` at runtime rather than copied. The data is the **Natural Scenes
 Dataset** (Allen et al., Nature Neuroscience 2022).
 
-**Harness code: MIT** ([LICENSE](LICENSE)). If you use this in research, please cite it —
-see [CITATION.cff](CITATION.cff). That is a request, not a licence condition; what MIT
-does require is that the copyright notice travels with any copy.
+**Harness code: MIT** ([LICENSE](LICENSE)). If you use this in research, please cite it.
+That is a request, not a licence condition; what MIT *does* require is that the copyright
+notice travels with any copy.
+
+```bibtex
+@software{nezhad2026mindeye2lora,
+  author = {Nezhad, Amin},
+  title = {{mindeye2-lora}: Low-Rank Adaptation of {MindEye2} for
+           Data-Efficient {fMRI}-to-Image Decoding},
+  year = {2026},
+  version = {v1.0.0},
+  publisher = {Zenodo},
+  doi = {10.5281/zenodo.22831388},
+  url = {https://github.com/AminMDNZ/mindeye2-lora},
+  license = {MIT},
+  note = {A controlled comparison of LoRA against full fine-tuning for
+          single-subject adaptation with one hour of scanning data}
+}
+```
+
+[CITATION.bib](CITATION.bib) has this plus all 29 works the report cites, keyed to match
+its reference list; [CITATION.cff](CITATION.cff) is the machine-readable form GitHub reads
+for its "Cite this repository" button. Cite **MindEye2** and **NSD** regardless — they are
+the substance of what the pipeline runs:
+
+```bibtex
+@inproceedings{scotti2024mindeye2,
+  author    = {Scotti, Paul S. and Tripathy, Mihir and Torrico, Cesar Kadir Villanueva
+               and Kneeland, Reese and Chen, Tong and Narang, Ashutosh and
+               Santhirasegaran, Charan and Xu, Jonathan and Naselaris, Thomas and
+               Norman, Kenneth A. and Abraham, Tanishq Mathew},
+  title     = {{MindEye2}: Shared-Subject Models Enable {fMRI}-to-Image with 1 Hour of Data},
+  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
+  volume    = {235}, pages = {44038--44059}, year = {2024}
+}
+
+@article{allen2022nsd,
+  author  = {Allen, Emily J. and St-Yves, Ghislain and Wu, Yihan and others},
+  title   = {A massive {7T} {fMRI} dataset to bridge cognitive neuroscience and
+             artificial intelligence},
+  journal = {Nature Neuroscience}, volume = {25}, number = {1}, pages = {116--126},
+  year    = {2022}
+}
+```
 
 **The MIT licence covers this repository only.** Two of the things the pipeline downloads
 are more restrictive, and one is a condition rather than a courtesy:
