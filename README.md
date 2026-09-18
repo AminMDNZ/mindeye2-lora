@@ -469,9 +469,12 @@ If you use this repository in your research, please cite:
   author = {Nezhad, Amin},
   title = {mindeye2-lora: Low-Rank Adaptation of MindEye2 for Data-Efficient fMRI-to-Image Decoding},
   year = {2026},
+  version = {v1.0.0},
   publisher = {Zenodo},
-  doi = {10.5281/zenodo.22831388}
+  doi = {10.5281/zenodo.22831388},
+  url = {https://github.com/AminMDNZ/mindeye2-lora}
 }
+```
 ## Credit and licensing
 
 This is an analysis harness around other people's models. The architecture,
