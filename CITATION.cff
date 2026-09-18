@@ -1,0 +1,46 @@
+cff-version: 1.2.0
+title: >-
+  mindeye2-lora: Low-Rank Adaptation of MindEye2 for Data-Efficient
+  fMRI-to-Image Decoding
+message: If you use this software or its results, please cite it.
+type: software
+authors:
+  - given-names: Patric
+    family-names: "[Surname]"
+    # orcid: https://orcid.org/0000-0000-0000-0000
+repository-code: "https://github.com/<user>/mindeye2-lora"
+abstract: >-
+  A controlled comparison of LoRA against full fine-tuning for adapting the
+  shared-subject MindEye2 fMRI-to-image model to a held-out participant with one
+  hour of scanning data. Six adaptation strategies across three seeds, with a
+  pre-specified statistical analysis, on a single consumer GPU.
+keywords:
+  - fMRI decoding
+  - image reconstruction
+  - MindEye2
+  - Natural Scenes Dataset
+  - LoRA
+  - parameter-efficient fine-tuning
+license: MIT
+date-released: "2026-09-18"
+references:
+  - type: conference-paper
+    title: "MindEye2: Shared-Subject Models Enable fMRI-To-Image with 1 Hour of Data"
+    authors:
+      - family-names: Scotti
+        given-names: Paul S.
+      - name: "and others"
+    collection-title: Proceedings of the 41st International Conference on Machine Learning
+    year: 2024
+    notes: The architecture, pretrained checkpoints and decoder used by this work.
+  - type: article
+    title: >-
+      A massive 7T fMRI dataset to bridge cognitive neuroscience and artificial
+      intelligence
+    authors:
+      - family-names: Allen
+        given-names: Emily J.
+      - name: "and others"
+    journal: Nature Neuroscience
+    year: 2022
+    notes: The Natural Scenes Dataset, used under its own terms.

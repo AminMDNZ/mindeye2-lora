@@ -1,0 +1,43 @@
+MIT License
+
+Copyright (c) 2026 Patric [Surname]
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+REQUEST FOR ATTRIBUTION (not a licence condition)
+
+The MIT terms above already require that this copyright notice travels with any
+copy or substantial portion of the code. Separately, and as a courtesy rather
+than a legal requirement, if you use this work in research please cite it. See
+CITATION.cff, or:
+
+    Patric [Surname] (2026). Low-Rank Adaptation of MindEye2 for Data-Efficient
+    fMRI-to-Image Decoding. https://github.com/<user>/mindeye2-lora
+
+--------------------------------------------------------------------------------
+
+THIRD-PARTY COMPONENTS
+
+This licence covers the code in this repository only. It does not cover the
+models, data or upstream code the pipeline downloads and imports at runtime,
+each of which carries its own terms — some more restrictive than MIT, and one
+(the Natural Scenes Dataset) requiring you to accept its conditions before use.
+See THIRD_PARTY_LICENSES.md.
